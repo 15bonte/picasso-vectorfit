@@ -444,6 +444,7 @@ class TestTheFitLeavesARecord:
             fit_z=fit_z,
             calibrate_z=False,
             spline_calibration=None,
+            vectorfit_parameters=None,
             lateral_transforms=[_entry("chromatic", CHROMATIC)],
             applied_lateral_transforms=[],
             camera_calibration=None,

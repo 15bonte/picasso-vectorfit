@@ -59,6 +59,7 @@ from . import (
     lib,
     avgroi,
     postprocess,
+    vectorfit,
     zfit,
     __version__,
 )
@@ -3671,10 +3672,12 @@ def fit(
         "spline-gpu",
         "spline-mle-gpu",
         "avg",
+        "vectorfit",
     ] = "gausslq",
     eps: float | None = None,
     max_it: int | None = None,
     spline_calibration: dict | None = None,
+    vectorfit_parameters: dict | None = None,
     camera_calibration: dict | None = None,
     multiprocess: bool = True,
     progress_callback: (
@@ -3708,7 +3711,7 @@ def fit(
             "gausslq-gpu", "gausslq-rotated-gpu", "gausslq-spherical-gpu", \
             "gaussmle", "gaussmle-spherical", "gaussmle-gpu", \
             "gaussmle-rotated-gpu", "gaussmle-spherical-gpu", "spline-gpu", \
-            "spline-mle-gpu" or "avg"}, optional
+            "spline-mle-gpu", "avg" or "vectorfit"}, optional
         Which 2D fitting algorithm to use. "gausslq" for least-squares
         fitting of a 2D Gaussian. "gausslq-gpu" for its GPU
         implementation (if available). "gaussmle" for MLE 2D Gaussian
@@ -3729,24 +3732,35 @@ def fit(
         GPU counterparts. All four
         require ``spline_calibration``, and a 3D spline calibration yields
         the fitted ``z`` directly. "avg" for taking the average of each
-        spot.
+        spot. "vectorfit" for maximum-likelihood fitting of a vectorial
+        PSF model with the optional VectorFit library (CPU), configured by
+        ``vectorfit_parameters``; its 3D model yields ``z`` directly.
     eps : float or None, optional
         The convergence criterion, honored by every iterating method on
         either device (all of them except "avg"). None (the default)
         picks the value that suits the method: 0.001 for "gaussmle",
-        0.01 for "gausslq" and the GPU Gaussians, and for either spline
-        backend 1e-4 with the axial multi-start and 1e-2 without.
+        0.01 for "gausslq" and the GPU Gaussians, for either spline
+        backend 1e-4 with the axial multi-start and 1e-2 without, and
+        1e-6 for "vectorfit".
     max_it : int or None, optional
         The maximum number of iterations per spot, as ``eps``. None (the
         default) means 100 for "gaussmle", 200 for "gausslq" (MINPACK's
-        own default), 20 for the GPU Gaussians and, for either spline
-        backend, 100 with the axial multi-start and 20 without.
+        own default), 20 for the GPU Gaussians, for either spline
+        backend 100 with the axial multi-start and 20 without, and 30 for
+        "vectorfit".
     spline_calibration : dict or None, optional
         Cubic-spline PSF calibration (see ``io.load_spline_calibration``),
         required for any "spline*" ``fitting_method`` and ignored
         otherwise. For a 3D spline calibration the resulting localizations
         contain the fitted ``z`` directly (no separate z-fitting step is
         needed). Default is None.
+    vectorfit_parameters : dict or None, optional
+        Optical and model settings of the "vectorfit" method (see
+        ``vectorfit.DEFAULT_PARAMETERS``); missing ones take their
+        defaults. The pixel size is read from ``camera_info``. The
+        number of outliers the fit discarded is recorded in the metadata
+        as "VectorFit outliers discarded". Ignored by the other methods.
+        Default is None.
     camera_calibration : dict or None, optional
         Per-pixel sCMOS camera calibration (see
         ``io.load_camera_calibration`` and ``scmos.calibrate_scmos``),
@@ -3760,9 +3774,11 @@ def fit(
         de-emphasizes noisy pixels. Least-squares fits are unaffected by
         the variance term itself (the shift cancels), but their
         uncertainties do grow on noisy pixels; prefer an MLE method for
-        sCMOS data. Default is None.
+        sCMOS data. "vectorfit" uses the offset and gain maps but not the
+        readout variance. Default is None.
     multiprocess : bool, optional
         Whether or not to use multiprocessing. Ignored for GPU fitting.
+        For "vectorfit", whether to fit on all CPU threads or on one.
         Default is True.
     progress_callback : callable, "console" or None, optional
         If a callable provided, it must accept one integer input (number
@@ -3799,6 +3815,12 @@ def fit(
         multiprocess,
         camera_calibration,
     )
+    if fitting_method == "vectorfit":
+        # before cutting the spots, which can take a while
+        vectorfit_parameters = vectorfit.parameters_with_defaults(
+            vectorfit_parameters
+        )
+        vectorfit.check_box(box)
     spots, variance = get_spots(
         movie,
         identifications,
@@ -3821,6 +3843,9 @@ def fit(
         eps=eps,
         max_it=max_it,
         spline_calibration=spline_calibration,
+        vectorfit_parameters=vectorfit_parameters,
+        pixelsize=camera_info["Pixelsize"],
+        image_shape=tuple(movie.shape[1:3]),
         multiprocess=multiprocess,
         progress_callback=progress_callback,
         abort_callback=abort_callback,
@@ -3832,7 +3857,14 @@ def fit(
         max_it,
         spline_calibration,
         camera_calibration,
+        vectorfit_parameters,
     )
+    if fitting_method == "vectorfit" and locs is not None:
+        # the only spots the vectorfit localizations leave out are the
+        # outliers it discards (none when it keeps them)
+        localize_info[vectorfit.OUTLIERS_KEY] = len(identifications) - len(
+            locs
+        )
     new_info = localize_info | camera_info
     return locs, new_info
 
@@ -3922,6 +3954,9 @@ def _dispatch_fit(
     multiprocess: bool,
     progress_callback: Callable[[int], None] | Literal["console"] | None,
     abort_callback: Callable[[], bool] | None,
+    vectorfit_parameters: dict | None = None,
+    pixelsize: float | None = None,
+    image_shape: tuple[int, int] | None = None,
 ) -> pd.DataFrame | None:
     """Run the fitting backend selected by ``fitting_method``.
 
@@ -3955,6 +3990,12 @@ def _dispatch_fit(
         Progress reporting, as in :func:`fit`.
     abort_callback : callable or None
         Abort check, as in :func:`fit`.
+    vectorfit_parameters : dict or None, optional
+        Settings of the "vectorfit" method, see :func:`fit`.
+    pixelsize : float or None, optional
+        Effective camera pixel size (nm), needed by "vectorfit".
+    image_shape : tuple of int or None, optional
+        ``(height, width)`` of the movie frames, needed by "vectorfit".
 
     Returns
     -------
@@ -4027,6 +4068,20 @@ def _dispatch_fit(
             abort_callback,
             variance=variance,
         )
+    elif fitting_method == "vectorfit":
+        locs = _fit2d_vectorfit(
+            spots=spots,
+            identifications=identifications,
+            em=em,
+            parameters=vectorfit_parameters,
+            pixelsize=pixelsize,
+            image_shape=image_shape,
+            tolerance=eps,
+            max_iterations=max_it,
+            multiprocess=multiprocess,
+            progress_callback=progress_callback,
+            abort_callback=abort_callback,
+        )
     return locs
 
 
@@ -4037,6 +4092,7 @@ def _fit_localize_info(
     max_it: int | None,
     spline_calibration: dict | None,
     camera_calibration: dict | None,
+    vectorfit_parameters: dict | None = None,
 ) -> dict:
     """Build the "Generated by"/schedule metadata dict written by ``fit``."""
     localize_info = {
@@ -4072,6 +4128,17 @@ def _fit_localize_info(
         localize_info["Convergence criterion"] = tolerance
         localize_info["Max iterations"] = max_iterations
         localize_info["Axial seeds"] = n_z_starts if apply_seeds else 1
+    if fitting_method == "vectorfit":
+        localize_info["Convergence criterion"] = (
+            vectorfit.TOLERANCE if eps is None else eps
+        )
+        localize_info["Max iterations"] = (
+            vectorfit.MAX_ITERATIONS if max_it is None else max_it
+        )
+        for key, value in vectorfit.parameters_with_defaults(
+            vectorfit_parameters
+        ).items():
+            localize_info[f"VectorFit {key}"] = value
     localize_info.update(camera_calibration_info(camera_calibration))
     return localize_info
 
@@ -4148,7 +4215,14 @@ def gauss_fit_methods() -> list[str]:
 #: :func:`gauss_fit_methods`) and listed for the rest, which have no grammar.
 FIT_METHODS = tuple(
     gauss_fit_methods()
-    + ["spline", "spline-mle", "spline-gpu", "spline-mle-gpu", "avg"]
+    + [
+        "spline",
+        "spline-mle",
+        "spline-gpu",
+        "spline-mle-gpu",
+        "avg",
+        "vectorfit",
+    ]
 )
 
 
@@ -8388,6 +8462,7 @@ def fit_independent(
     eps: float | list | None = None,
     max_it: int | list | None = None,
     spline_calibration: dict | list | None = None,
+    vectorfit_parameters: dict | list | None = None,
     camera_calibration: dict | list | None = None,
     multiprocess: bool = True,
     progress_callback: (
@@ -8424,6 +8499,9 @@ def fit_independent(
         A single-channel spline PSF calibration per channel, or one shared by
         all. A joint ``"spline-3d-multichannel"`` calibration is rejected -
         it belongs to :func:`fit_spline_multichannel`.
+    vectorfit_parameters : dict, list or None, optional
+        Settings of the "vectorfit" method (see :func:`fit`) per channel, or
+        one set shared by all.
     camera_calibration : dict, list or None, optional
         Per-pixel sCMOS calibration per channel, or one shared by all. Each
         must match the shape of its own movie.
@@ -8458,6 +8536,9 @@ def fit_independent(
     cameras = _per_channel_arg(
         camera_calibration, n_channels, "camera_calibration"
     )
+    vectorfits = _per_channel_arg(
+        vectorfit_parameters, n_channels, "vectorfit_parameters"
+    )
     results = []
     for c in range(n_channels):
         _check_single_channel_calibration(splines[c], c)
@@ -8470,6 +8551,7 @@ def fit_independent(
             eps=epss[c],
             max_it=max_its[c],
             spline_calibration=splines[c],
+            vectorfit_parameters=vectorfits[c],
             camera_calibration=cameras[c],
             multiprocess=multiprocess,
             progress_callback=_channel_progress(progress_callback, c),
@@ -8499,6 +8581,7 @@ def fit_split_fov_independent(
     eps: float | list | None = None,
     max_it: int | list | None = None,
     spline_calibration: dict | list | None = None,
+    vectorfit_parameters: dict | list | None = None,
     camera_calibration: dict | None = None,
     multiprocess: bool = True,
     progress_callback: (
@@ -8539,7 +8622,7 @@ def fit_split_fov_independent(
     to_local : bool, optional
         Move each region's localizations into its own coordinate frame
         (default True). False keeps them in sensor coordinates.
-    eps, max_it, spline_calibration : optional
+    eps, max_it, spline_calibration, vectorfit_parameters : optional
         Per region or shared, as in :func:`fit_independent`.
     camera_calibration : dict or None, optional
         Per-pixel sCMOS calibration for the (single) camera, covering the
@@ -8570,6 +8653,9 @@ def fit_split_fov_independent(
     splines = _per_channel_arg(
         spline_calibration, n_regions, "spline_calibration"
     )
+    vectorfits = _per_channel_arg(
+        vectorfit_parameters, n_regions, "vectorfit_parameters"
+    )
     results = []
     for c, region in enumerate(regions):
         _check_single_channel_calibration(splines[c], c)
@@ -8582,6 +8668,7 @@ def fit_split_fov_independent(
             eps=epss[c],
             max_it=max_its[c],
             spline_calibration=splines[c],
+            vectorfit_parameters=vectorfits[c],
             camera_calibration=camera_calibration,
             multiprocess=multiprocess,
             progress_callback=_channel_progress(progress_callback, c),
@@ -8637,6 +8724,49 @@ def _fit2d_avg(
         readout_variance=_mean_readout_variance(variance),
     )
     return locs
+
+
+def _fit2d_vectorfit(
+    spots: lib.FloatArray3D,
+    identifications: pd.DataFrame,
+    em: bool,
+    parameters: dict,
+    pixelsize: float,
+    image_shape: tuple[int, int],
+    tolerance: float | None = None,
+    max_iterations: int | None = None,
+    multiprocess: bool = True,
+    progress_callback: (
+        Callable[[int], None] | Literal["console"] | None
+    ) = None,
+    abort_callback: Callable[[], bool] | None = None,
+) -> pd.DataFrame | None:
+    """Fit a vectorial PSF model with VectorFit, see ``fit`` for more
+    details. VectorFit runs its own threads, so ``multiprocess`` only
+    chooses between all of them and one. Returns None if
+    ``abort_callback`` asked to stop."""
+    result = vectorfit.fit_spots(
+        spots,
+        identifications,
+        parameters,
+        pixelsize,
+        image_shape,
+        tolerance=tolerance,
+        max_iterations=max_iterations,
+        n_threads=lib.n_workers() if multiprocess else 1,
+        progress_callback=progress_callback,
+        abort_callback=abort_callback,
+    )
+    if result is None:
+        return None
+    return vectorfit.locs_from_fits(
+        identifications,
+        result,
+        pixelsize,
+        em,
+        discard_outliers=parameters["Discard outliers"],
+        spots=spots,
+    )
 
 
 def _process_fitting_futures(
@@ -8702,10 +8832,12 @@ def localize(
         "spline-gpu",
         "spline-mle-gpu",
         "avg",
+        "vectorfit",
     ] = "gausslq",
     eps: float | None = None,
     max_it: int | None = None,
     spline_calibration: dict | None = None,
+    vectorfit_parameters: dict | None = None,
     calibration_3d: dict | str | None = None,
     affine_calibration: dict | list | None = None,
     camera_calibration: dict | None = None,
@@ -8784,8 +8916,8 @@ def localize(
     fitting_method : {"gausslq", "gausslq-spherical", "gausslq-rotated", \
             "gausslq-gpu", "gausslq-rotated-gpu", "gausslq-spherical-gpu", \
             "gaussmle", "gaussmle-spherical", "gaussmle-gpu", \
-            "gaussmle-rotated-gpu", "gaussmle-spherical-gpu" or "avg"}, \
-            optional
+            "gaussmle-rotated-gpu", "gaussmle-spherical-gpu", "avg" or \
+            "vectorfit"}, optional
         Which 2D fitting algorithm to use, see ``fit``. Default is
         "gausslq".
     eps : float or None, optional
@@ -8801,6 +8933,8 @@ def localize(
         For a 3D spline calibration the resulting localizations contain the
         fitted ``z`` directly, so no separate z-fitting step is needed.
         Default is None.
+    vectorfit_parameters : dict or None, optional
+        Settings of the "vectorfit" method, see ``fit``. Default is None.
     calibration_3d : dict, str or None, optional
         Astigmatism calibration for fitting z on top of the 2D fit,
         either an already loaded calibration dictionary or a path to a
@@ -8816,7 +8950,8 @@ def localize(
           localization data.
 
         Ignored for the "spline*" fitting methods, which fit z
-        themselves from ``spline_calibration``. Not supported for "avg",
+        themselves from ``spline_calibration``, and for "vectorfit",
+        whose 3D model fits z itself. Not supported for "avg",
         which fits no Gaussian widths, nor for the "*-spherical" methods,
         which constrain sx == sy and so carry no astigmatism. The
         "*-rotated" methods report sx and sy along the rotated principal
@@ -8906,6 +9041,7 @@ def localize(
         eps=eps,
         max_it=max_it,
         spline_calibration=spline_calibration,
+        vectorfit_parameters=vectorfit_parameters,
         camera_calibration=camera_calibration,
         multiprocess=threaded,
         progress_callback=fit_progress_callback,
@@ -9051,6 +9187,7 @@ def localize_frames(
     eps: float | None = None,
     max_it: int | None = None,
     spline_calibration: dict | None = None,
+    vectorfit_parameters: dict | None = None,
     camera_calibration: dict | None = None,
     threaded: bool = True,
     identification_progress_callback: (
@@ -9099,7 +9236,8 @@ def localize_frames(
     fitting_method : str, optional
         Which fitting algorithm to use, see :func:`fit`. Default ``"gausslq"``
         (GPU variants such as ``"gausslq-gpu"`` run on the GPU if available).
-    eps, max_it, spline_calibration, camera_calibration, threaded
+    eps, max_it, spline_calibration, vectorfit_parameters, \
+camera_calibration, threaded
         Forwarded to :func:`localize` unchanged.
     identification_progress_callback, fit_progress_callback
         Progress callbacks forwarded to :func:`localize`.
@@ -9138,6 +9276,7 @@ def localize_frames(
         eps=eps,
         max_it=max_it,
         spline_calibration=spline_calibration,
+        vectorfit_parameters=vectorfit_parameters,
         camera_calibration=camera_calibration,
         threaded=threaded,
         identification_progress_callback=identification_progress_callback,
@@ -9172,6 +9311,14 @@ def _validate_calibration_3d(
         warnings.warn(
             "Ignoring calibration_3d: the spline PSF fit recovers z itself, "
             "using spline_calibration.",
+            stacklevel=3,
+        )
+        return False
+    if fitting_method == "vectorfit":
+        # The 3D vectorial PSF model fits z itself.
+        warnings.warn(
+            "Ignoring calibration_3d: VectorFit fits z itself with its 3D "
+            "model (see vectorfit_parameters).",
             stacklevel=3,
         )
         return False

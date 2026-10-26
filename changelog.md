@@ -42,6 +42,7 @@ Last change: 10-OCT-2026 CEST
 - Fixed: the `locs` column of saved pick properties held the number of binding events (the same as `n_events`) instead of the number of localizations in the pick (`picasso.postprocess.pick_kinetics`, `pick_properties`).
 
 ### Localize
+- New PSF model *Vectorial PSF (VectorFit)*: maximum-likelihood fitting of a vectorial PSF computed from the optics, in 2D or 3D (``z`` fitted directly), with the optional [VectorFit](https://gitlab.tudelft.nl/imphys/ci/vectorfit) library on the CPU (`pip install picassosr[vectorfit]`). Fit method `vectorfit` in `picasso.localize.fit` / `localize` (settings in `vectorfit_parameters`, see `picasso.vectorfit`) and in `picasso localize` (`--fit-method vectorfit` with the `--vf-*` options). The spots VectorFit flags as outliers are discarded unless asked otherwise, and their number is saved in the metadata (`VectorFit outliers discarded`).
 - New spot identification method: B-spline wavelet segmentation (Izeddin et al., *Opt. Express* 2012), see the [documentation](https://picassosr.readthedocs.io/en/latest/localize/identification.html#localize-wavelet).
 - New column `reduced_chi_square` for MLE and least-squares fits: the goodness of fit normalized for the box size and the photon counts, about 1 for a good fit (`picasso.localize.reduced_chi_square`).
 - Fixed: ratiometric multichannel spline fitting ignored the per-pixel sCMOS variance of the camera calibration.

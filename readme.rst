@@ -61,7 +61,7 @@ Via PyPI
 3. Install Picasso package using: ``pip install picassosr``.
 4. You can now run any Picasso function directly from the console/terminal by running: ``picasso render``, ``picasso localize``, etc, or import Picasso functions in your own Python scripts.
 5. To update Picasso (you should get a notification about available updates since v0.10.0) run ``pip install --upgrade picassosr``.
-6. You can optionally install dependencies for .czi and .lif formats by passing ``pip install picassosr[czi]`` or ``pip install picassosr[lif]``.
+6. You can optionally install dependencies for .czi and .lif formats by passing ``pip install picassosr[czi]`` or ``pip install picassosr[lif]``, and for vectorial PSF fitting with VectorFit (CPU) by passing ``pip install picassosr[vectorfit]``.
 7. To enable GPU-accelerated (numba.cuda) code and GPU rendering, install the GPU dependencies with ``pip install picassosr[gpu]``. This requires an NVIDIA (CUDA-capable) GPU. The ``gpu`` extra targets CUDA toolkit 12.x; for other toolkits use ``pip install picassosr[cuda11]`` or ``pip install picassosr[cuda13]`` instead. For GPU rendering only (any recent graphics card), use ``pip install picassosr[wgpu]``. Without these extras, Picasso runs fine on the CPU and GPU-only options are hidden.
 
 For Developers (local, editable installation)

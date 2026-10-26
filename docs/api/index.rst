@@ -35,6 +35,7 @@ Localization
    picasso.gausslq
    picasso.gaussmle
    picasso.avgroi
+   picasso.vectorfit
    picasso.zfit
    picasso.spline
    picasso.wavelet

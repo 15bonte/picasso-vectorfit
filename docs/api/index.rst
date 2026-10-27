@@ -120,7 +120,6 @@ Localization
    :nosignatures:
 
    picasso.localize
-   picasso.vectorfit
    picasso.zfit
    picasso.spline
    picasso.registration

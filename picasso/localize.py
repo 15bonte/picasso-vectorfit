@@ -4073,11 +4073,21 @@ def fit(
         contain the fitted ``z`` directly (no separate z-fitting step is
         needed). Default is None.
     vectorfit_parameters : dict or None, optional
-        Optical and model settings of the "vectorfit" method (see
-        ``vectorfit.DEFAULT_PARAMETERS``); missing ones take their
-        defaults. The pixel size is read from ``camera_info``. The
-        number of outliers the fit discarded is recorded in the metadata
-        as "VectorFit outliers discarded". Ignored by the other methods.
+        Optical and model settings of the "vectorfit" method; missing
+        ones take their defaults:
+
+        - "Fit model": "2D" or "3D" (also fits ``z``), default "3D";
+        - "Wavelength": emission wavelength in nm, default 680;
+        - "NA": numerical aperture, default 1.5;
+        - "Refractive index medium", "Refractive index cover slip",
+          "Refractive index immersion": defaults 1.406, 1.525, 1.515;
+        - "Working distance": of the objective in um, default 150;
+        - "Discard outliers": drop the spots VectorFit flags as outliers,
+          default True.
+
+        The pixel size is read from ``camera_info``. The number of
+        outliers the fit discarded is recorded in the metadata as
+        "VectorFit outliers discarded". Ignored by the other methods.
         Default is None.
     camera_calibration : dict or None, optional
         Per-pixel sCMOS camera calibration (see
@@ -4185,6 +4195,11 @@ def fit(
                 vectorfit_parameters=vectorfit_parameters,
                 abort_callback=abort_callback,
                 pixelsize=float(camera_info["Pixelsize"]),
+                image_shape=(
+                    tuple(movie.shape[1:3])
+                    if fitting_method == "vectorfit"
+                    else None
+                ),
             )
     localize_info = _fit_localize_info(
         fitting_method,
@@ -4330,6 +4345,7 @@ def _dispatch_fit(
     abort_callback: Callable[[], bool] | None,
     vectorfit_parameters: dict | None = None,
     pixelsize: float,
+    image_shape: tuple[int, int] | None = None,
 ) -> pd.DataFrame | None:
     """Run the fitting backend selected by ``fitting_method``.
 
@@ -4367,6 +4383,8 @@ def _dispatch_fit(
         Settings of the "vectorfit" method, see :func:`fit`.
     pixelsize : float
         Camera pixel size in nm, converting the fitted positions to nm.
+    image_shape : tuple of int or None, optional
+        ``(height, width)`` of the movie frames, needed by "vectorfit".
 
     Returns
     -------
@@ -4448,8 +4466,8 @@ def _dispatch_fit(
             image_shape=image_shape,
             tolerance=eps,
             max_iterations=max_it,
-            multiprocess=multiprocess,
-            progress_callback=progress_callback,
+            parallel=parallel,
+            progress=progress,
             abort_callback=abort_callback,
         )
     return locs
@@ -9672,26 +9690,25 @@ def _fit2d_vectorfit(
     image_shape: tuple[int, int],
     tolerance: float | None = None,
     max_iterations: int | None = None,
-    multiprocess: bool = True,
-    progress_callback: (
-        Callable[[int], None] | Literal["console"] | None
-    ) = None,
+    parallel: bool = True,
+    progress: lib.Progress | None = None,
     abort_callback: Callable[[], bool] | None = None,
 ) -> pd.DataFrame | None:
     """Fit a vectorial PSF model with VectorFit, see ``fit`` for more
-    details. VectorFit runs its own threads, so ``multiprocess`` only
-    chooses between all of them and one. Returns None if
+    details. VectorFit runs its own threads, so ``parallel`` only chooses
+    between all of them and one. ``progress`` (a normalized tracker, or
+    None) gets the "Fitting spots" phase. Returns None if
     ``abort_callback`` asked to stop."""
     result = vectorfit.fit_spots(
         spots,
         identifications,
-        parameters,
-        pixelsize,
-        image_shape,
+        parameters=parameters,
+        pixelsize=pixelsize,
+        image_shape=image_shape,
         tolerance=tolerance,
         max_iterations=max_iterations,
-        n_threads=lib.n_workers() if multiprocess else 1,
-        progress_callback=progress_callback,
+        n_threads=lib.n_workers() if parallel else 1,
+        progress=progress,
         abort_callback=abort_callback,
     )
     if result is None:
@@ -9699,8 +9716,8 @@ def _fit2d_vectorfit(
     return vectorfit.locs_from_fits(
         identifications,
         result,
-        pixelsize,
-        em,
+        pixelsize=pixelsize,
+        em=em,
         discard_outliers=parameters["Discard outliers"],
         spots=spots,
     )
@@ -10177,7 +10194,8 @@ def localize_frames(
     fitting_method : str, optional
         Which fitting algorithm to use, see :func:`fit`. Default ``"gausslq"``
         (GPU variants such as ``"gausslq-gpu"`` run on the GPU if available).
-    eps, max_it, spline_calibration, vectorfit_parameters, camera_calibration, parallel
+    eps, max_it, spline_calibration, vectorfit_parameters, \
+camera_calibration, parallel
         Forwarded to :func:`localize` unchanged.
     progress : lib.Progress, "console" or None, optional
         Progress tracker, see ``picasso.lib.Progress``: e.g. a

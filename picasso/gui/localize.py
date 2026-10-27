@@ -388,7 +388,7 @@ MODEL_TOOLTIP = (
     "(much faster).\n\n"
     "Average of ROI:\n"
     "No fit: reports the summed intensity of the box (photons).\n"
-    "x/y stay at the identified pixel (no sub-pixel position)."
+    "x/y stay at the identified pixel (no sub-pixel position).\n\n"
     "Vectorial PSF (VectorFit):\n"
     "Maximum-likelihood fit of a vectorial PSF model computed from\n"
     "the optics (NA, wavelength, refractive indices), no calibration\n"
@@ -492,6 +492,15 @@ def _filtered_identification_movie(
     else:
         gaussian = None
     return movie, [temporal, gaussian]
+
+
+def _outliers_note(info: list[dict]) -> str:
+    """The status bar's note on the outliers a VectorFit fit discarded,
+    read from the fit's metadata; "" for any other fit."""
+    n_outliers = vectorfit.outliers_discarded(info)
+    if n_outliers is None:
+        return ""
+    return f" Discarded {n_outliers:,} outliers."
 
 
 def _fit_code(model: str, optimizer: str) -> str:
@@ -6942,9 +6951,6 @@ class Window(QtWidgets.QMainWindow):
         self.bead_diagnostics = []
         self.bead_calibration_path = None
         self._active_worker = None
-        # Outliers the last VectorFit fit discarded, for the saved metadata
-        # (see _record_vectorfit_outliers); None after any other fit.
-        self._vectorfit_outliers = None
         # Affine-transform (astigmatism) calibration dialog and its worker;
         # both created lazily when the calibration is first opened/run.
         self._affine_dialog = None
@@ -12892,14 +12898,13 @@ class Window(QtWidgets.QMainWindow):
         state = self._multi_fit
         if state is None:  # aborted while the fit was finishing
             return
-        outliers = self._record_vectorfit_outliers(self._active_worker)
         self._active_worker = None
         self.abort_action.setEnabled(False)
         region = state["regions"][state["current"]]
         self.status_bar.showMessage(
             f"Fitted {len(locs):,} spots in region "
             f"{localize.region_label(state['current'])} in "
-            f"{elapsed_time:.2f} seconds." + outliers
+            f"{elapsed_time:.2f} seconds." + _outliers_note(info)
         )
         self.locs = localize.locs_to_region_coordinates(
             locs, region, self.parameters_dialog.pixelsize.value()
@@ -13685,16 +13690,6 @@ class Window(QtWidgets.QMainWindow):
         the calibration it used applies them itself. The metadata the fit
         returns records them."""
 
-    def _record_vectorfit_outliers(self, worker) -> str:
-        """Keep how many outliers the finished VectorFit fit discarded, so
-        that ``save_locs`` can write it into the metadata (the workers
-        discard the info their fit returns). Returns the note for the status
-        bar, "" for any other fit."""
-        self._vectorfit_outliers = getattr(worker, "vectorfit_outliers", None)
-        if self._vectorfit_outliers is None:
-            return ""
-        return f" Discarded {self._vectorfit_outliers:,} outliers."
-
         skipped = list(
             getattr(worker, "skipped_lateral_transforms", None) or []
         )
@@ -13796,12 +13791,11 @@ class Window(QtWidgets.QMainWindow):
         markers, fit/calibration z coordinates, if requested, save
         localizations."""
         self._report_skipped_lateral(self._active_worker)
-        outliers = self._record_vectorfit_outliers(self._active_worker)
         self._active_worker = None
         self.abort_action.setEnabled(False)
         self.status_bar.showMessage(
             f"Fitted {len(locs):,} spots in {elapsed_time:.2f} seconds."
-            + outliers
+            + _outliers_note(info)
         )
         self.locs = locs
         self.locs_display = locs
@@ -14223,14 +14217,6 @@ class Window(QtWidgets.QMainWindow):
     def save_locs(self, path: str) -> None:
         """Save localizations and their metadata (``extra_info``), as the
         fit and the steps after it returned them."""
-        if FIT_MODELS.get(model, {}).get("needs_vectorfit_parameters"):
-            parameters = self.parameters_dialog.vectorfit_parameters()
-            for key, value in parameters.items():
-                localize_info[f"VectorFit {key}"] = value
-            if self._vectorfit_outliers is not None:
-                localize_info[vectorfit.OUTLIERS_KEY] = (
-                    self._vectorfit_outliers
-                )
         self.select_locs_columns()  # save only selected columns
         io.save_locs(path, self.locs, self.extra_info)
 
@@ -14525,9 +14511,6 @@ class FitWorker(QtCore.QThread):
         self.lateral_transforms = lateral_transforms or []
         self.camera_calibration = camera_calibration
         self.vectorfit_parameters = vectorfit_parameters
-        # How many outliers a VectorFit fit discarded, for the metadata
-        # (see Window._record_vectorfit_outliers); None for other methods.
-        self.vectorfit_outliers = None
         self.N = len(identifications)
         self.method = _effective_fit_code(method, use_gpu)
 
@@ -14587,7 +14570,6 @@ class FitWorker(QtCore.QThread):
         if locs is None:  # handle aborted process
             self.aborted.emit()
             return
-        self.vectorfit_outliers = vectorfit.outliers_discarded(info)
         dt = time.time() - t0
         self.finished.emit(locs, info, dt, self.fit_z, self.calibrate_z)
 

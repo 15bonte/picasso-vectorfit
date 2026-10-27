@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from picasso import io, localize, vectorfit
+from picasso import io, lib, localize, vectorfit
 
 requires_vectorfit = pytest.mark.skipif(
     not vectorfit.VECTORFIT_AVAILABLE,
@@ -34,7 +34,6 @@ CAMERA_INFO = {
     "Baseline": 100,
     "Sensitivity": 0.45,
     "Gain": 1,
-    "Qe": 1,
     "Pixelsize": 130,
 }
 
@@ -71,6 +70,24 @@ def _identifications(n_spots: int, frames=None) -> pd.DataFrame:
     )
 
 
+def _identifications_in_movie(n_spots: int) -> pd.DataFrame:
+    """Box centers that fit inside the bundled 32 x 32 test movie."""
+    return pd.DataFrame(
+        {
+            "frame": np.arange(n_spots, dtype=np.uint32),
+            "x": np.full(n_spots, 15, dtype=np.int32),
+            "y": np.full(n_spots, 15, dtype=np.int32),
+            "net_gradient": np.ones(n_spots, dtype=np.float32),
+        }
+    )
+
+
+def _identification_parameters() -> localize.IdentificationParameters:
+    return localize.IdentificationParameters(
+        method=localize.NetGradient(5000), box=BOX
+    )
+
+
 def _fake_result(n_spots: int, is_3d: bool = True) -> dict:
     """A ``fit_spots`` result with distinguishable values per parameter."""
     n_parameters = 5 if is_3d else 4
@@ -95,6 +112,21 @@ def _fake_result(n_spots: int, is_3d: bool = True) -> dict:
         "log_likelihood": np.full(n_spots, -20.0),
         "outlier": np.zeros(n_spots, dtype=bool),
     }
+
+
+class _RecordingProgress(lib.MockProgress):
+    """Remembers every value and phase it was given."""
+
+    def __init__(self):
+        super().__init__()
+        self.values = []
+        self.phases = []
+
+    def set_value(self, value, *args, **kwargs):
+        self.values.append(value)
+
+    def zero_progress(self, description=None, unit=None):
+        self.phases.append(description)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +199,16 @@ class TestParameters:
         with pytest.raises(ImportError, match=r"picassosr\[vectorfit\]"):
             vectorfit._import_vectorfit()
 
+    def test_outliers_discarded_reads_the_metadata(self):
+        key = vectorfit.OUTLIERS_KEY
+        assert vectorfit.outliers_discarded({key: 5}) == 5
+        # 0 is a count, not a missing entry (lib.get_from_metadata skips
+        # falsy values)
+        assert vectorfit.outliers_discarded([{}, {key: 0}]) == 0
+        assert vectorfit.outliers_discarded([{key: 1}, {key: 2}]) == 2
+        assert vectorfit.outliers_discarded([{"Fit method": "avg"}]) is None
+        assert vectorfit.outliers_discarded({}) is None
+
 
 # ---------------------------------------------------------------------------
 # From fit results to localizations
@@ -175,19 +217,20 @@ class TestParameters:
 
 class TestLocsFromFits:
     def test_columns_and_units_3d(self):
+        """Every length in nm, as everywhere in Picasso 1.0."""
         identifications = _identifications(4)
         locs = vectorfit.locs_from_fits(
-            identifications, _fake_result(4), PIXELSIZE, em=False
+            identifications, _fake_result(4), pixelsize=PIXELSIZE, em=False
         )
         np.testing.assert_allclose(
-            locs["x"], identifications["x"] - 22.0 / PIXELSIZE, rtol=1e-6
+            locs["x"], identifications["x"] * PIXELSIZE - 22.0, rtol=1e-6
         )
         np.testing.assert_allclose(
-            locs["y"], identifications["y"] + 11.0 / PIXELSIZE, rtol=1e-6
+            locs["y"], identifications["y"] * PIXELSIZE + 11.0, rtol=1e-6
         )
-        np.testing.assert_allclose(locs["lpx"], 4.4 / PIXELSIZE, rtol=1e-6)
-        np.testing.assert_allclose(locs["lpy"], 2.2 / PIXELSIZE, rtol=1e-6)
-        # z in nm, pointing the other way than VectorFit's
+        np.testing.assert_allclose(locs["lpx"], 4.4, rtol=1e-6)
+        np.testing.assert_allclose(locs["lpy"], 2.2, rtol=1e-6)
+        # z pointing the other way than VectorFit's
         np.testing.assert_allclose(locs["z"], -50.0)
         np.testing.assert_allclose(locs["lpz"], 9.0)
         np.testing.assert_allclose(locs["photons"], 1000.0)
@@ -206,20 +249,30 @@ class TestLocsFromFits:
         locs = vectorfit.locs_from_fits(
             _identifications(3),
             _fake_result(3, is_3d=False),
-            PIXELSIZE,
+            pixelsize=PIXELSIZE,
             em=False,
         )
         assert "z" not in locs and "lpz" not in locs
         np.testing.assert_allclose(locs["photons"], 1000.0)
 
+    @pytest.mark.parametrize("pixelsize", [0, -1, np.nan])
+    def test_pixelsize_must_be_positive(self, pixelsize):
+        with pytest.raises(ValueError, match="pixel size"):
+            vectorfit.locs_from_fits(
+                _identifications(2),
+                _fake_result(2),
+                pixelsize=pixelsize,
+                em=False,
+            )
+
     def test_emccd_doubles_the_variances(self):
         identifications = _identifications(3)
         result = _fake_result(3)
         plain = vectorfit.locs_from_fits(
-            identifications, result, PIXELSIZE, em=False
+            identifications, result, pixelsize=PIXELSIZE, em=False
         )
         em = vectorfit.locs_from_fits(
-            identifications, result, PIXELSIZE, em=True
+            identifications, result, pixelsize=PIXELSIZE, em=True
         )
         for column in ("lpx", "lpy", "lpz", "photons_unc", "bg_unc"):
             np.testing.assert_allclose(
@@ -234,12 +287,12 @@ class TestLocsFromFits:
         kept = vectorfit.locs_from_fits(
             identifications,
             result,
-            PIXELSIZE,
+            pixelsize=PIXELSIZE,
             em=False,
             discard_outliers=False,
         )
         dropped = vectorfit.locs_from_fits(
-            identifications, result, PIXELSIZE, em=False
+            identifications, result, pixelsize=PIXELSIZE, em=False
         )
         assert len(kept) == 5
         assert len(dropped) == 3
@@ -248,7 +301,10 @@ class TestLocsFromFits:
     def test_sorted_by_frame(self):
         frames = [4, 1, 3, 0, 2]
         locs = vectorfit.locs_from_fits(
-            _identifications(5, frames), _fake_result(5), PIXELSIZE, False
+            _identifications(5, frames),
+            _fake_result(5),
+            pixelsize=PIXELSIZE,
+            em=False,
         )
         assert list(locs["frame"]) == sorted(frames)
         assert list(locs.index) == list(range(5))
@@ -258,7 +314,7 @@ class TestLocsFromFits:
         locs = vectorfit.locs_from_fits(
             _identifications(3),
             _fake_result(3),
-            PIXELSIZE,
+            pixelsize=PIXELSIZE,
             em=False,
             spots=spots,
         )
@@ -299,12 +355,11 @@ class TestLocalizeWiring:
             assert not localize._validate_calibration_3d({}, "vectorfit")
 
     def test_unsupported_box_is_rejected_before_cutting(self, movie):
-        identifications = _identifications(2)
         with pytest.raises(ValueError, match="box size"):
             localize.fit(
                 movie,
                 camera_info=dict(CAMERA_INFO),
-                identifications=identifications,
+                identifications=_identifications(2),
                 box=11,
                 fitting_method="vectorfit",
             )
@@ -351,16 +406,11 @@ class TestLocalizeWiring:
         self, movie, monkeypatch, n_discarded
     ):
         """As Vermeer reports them: the spots the fit dropped as outliers."""
-        identifications = pd.DataFrame(
-            {
-                "frame": np.arange(8, dtype=np.uint32),
-                "x": np.full(8, 15, dtype=np.int32),
-                "y": np.full(8, 15, dtype=np.int32),
-                "net_gradient": np.ones(8, dtype=np.float32),
-            }
-        )
+        identifications = _identifications_in_movie(8)
+        given = {}
 
         def fake_fit(*, identifications, **kwargs):
+            given.update(kwargs)
             return identifications.iloc[n_discarded:].reset_index(drop=True)
 
         monkeypatch.setattr(localize, "_fit2d_vectorfit", fake_fit)
@@ -372,17 +422,11 @@ class TestLocalizeWiring:
             fitting_method="vectorfit",
         )
         assert len(locs) == 8 - n_discarded
-        assert info["VectorFit outliers discarded"] == n_discarded
-
-    def test_outliers_discarded_reads_the_metadata(self):
-        key = vectorfit.OUTLIERS_KEY
-        assert vectorfit.outliers_discarded({key: 5}) == 5
-        # 0 is a count, not a missing entry (lib.get_from_metadata skips
-        # falsy values)
-        assert vectorfit.outliers_discarded([{}, {key: 0}]) == 0
-        assert vectorfit.outliers_discarded([{key: 1}, {key: 2}]) == 2
-        assert vectorfit.outliers_discarded([{"Fit method": "avg"}]) is None
-        assert vectorfit.outliers_discarded({}) is None
+        assert vectorfit.outliers_discarded(info) == n_discarded
+        # what the VectorFit fit needs from the movie and the camera
+        assert given["image_shape"] == tuple(movie.shape[1:3])
+        assert given["pixelsize"] == CAMERA_INFO["Pixelsize"]
+        assert given["parallel"] is True
 
     def test_aborted_fit_records_no_outliers(self, movie, monkeypatch):
         monkeypatch.setattr(
@@ -396,26 +440,27 @@ class TestLocalizeWiring:
             fitting_method="vectorfit",
         )
         assert locs is None
-        assert "VectorFit outliers discarded" not in info
+        assert vectorfit.outliers_discarded(info) is None
 
     def test_other_methods_record_no_outliers(self, movie):
-        identifications = pd.DataFrame(
-            {
-                "frame": np.arange(3, dtype=np.uint32),
-                "x": np.full(3, 15, dtype=np.int32),
-                "y": np.full(3, 15, dtype=np.int32),
-                "net_gradient": np.ones(3, dtype=np.float32),
-            }
-        )
         _, info = localize.fit(
             movie,
             camera_info=dict(CAMERA_INFO),
-            identifications=identifications,
+            identifications=_identifications_in_movie(3),
             box=BOX,
             fitting_method="avg",
-            multiprocess=False,
+            parallel=False,
         )
-        assert "VectorFit outliers discarded" not in info
+        assert vectorfit.outliers_discarded(info) is None
+
+    def test_fit_documents_every_setting_with_its_default(self):
+        """``picasso.vectorfit`` is not public, so ``localize.fit`` names
+        the settings and their defaults itself; pin them."""
+        doc = " ".join(localize.fit.__doc__.split())
+        for key, value in vectorfit.DEFAULT_PARAMETERS.items():
+            assert f'"{key}"' in doc
+            stated = f"{value:g}" if isinstance(value, float) else str(value)
+            assert stated in doc, key
 
     def test_settings_reach_every_entry_point(self):
         """``vectorfit_parameters`` must be accepted (and forwarded) by
@@ -535,6 +580,12 @@ class TestGui:
             vectorfit.MAX_ITERATIONS,
         )
 
+    def test_model_tooltip_lists_it_on_its_own(self):
+        """Each model gets its own paragraph in the tooltip."""
+        from picasso.gui import localize as localize_gui
+
+        assert "\n\nVectorial PSF (VectorFit):\n" in localize_gui.MODEL_TOOLTIP
+
     def test_selecting_it_shows_its_settings(self, qt_offscreen):
         dialog = self._dialog()
         try:
@@ -568,22 +619,24 @@ class TestGui:
         finally:
             dialog.deleteLater()
 
-    def test_worker_keeps_the_outliers_discarded(self, monkeypatch):
-        """The window rebuilds the metadata from the dialog when saving, so
-        the worker must hold on to the count the fit reported."""
+    def test_worker_forwards_the_settings(self, monkeypatch):
+        """The worker hands the dialog's settings to the fit and passes the
+        fit's metadata, the VectorFit settings and outliers included, on to
+        the window, which saves it as it is."""
         import types
 
         from picasso.gui import localize as localize_gui
 
         identifications = _identifications(5)
-        monkeypatch.setattr(
-            localize_gui.localize,
-            "fit",
-            lambda **kwargs: (
-                identifications.iloc[2:],
-                {"VectorFit outliers discarded": 2},
-            ),
-        )
+        settings = {"Fit model": "2D", "NA": 1.3}
+        given = {}
+        fit_info = [{"Fit method": "vectorfit", vectorfit.OUTLIERS_KEY: 2}]
+
+        def fake_fit(*args, **kwargs):
+            given.update(kwargs)
+            return identifications.iloc[2:], fit_info
+
+        monkeypatch.setattr(localize_gui.localize, "fit", fake_fit)
         worker = localize_gui.FitWorker(
             None,
             [],
@@ -596,30 +649,39 @@ class TestGui:
             False,
             False,
             False,
+            vectorfit_parameters=settings,
         )
         out = {}
         worker.finished = types.SimpleNamespace(
-            emit=lambda locs, *a: out.update(locs=locs)
+            emit=lambda locs, info, *a: out.update(locs=locs, info=info)
         )
-        worker.progressMade = types.SimpleNamespace(emit=lambda *a: None)
         worker.run()
+        assert given["vectorfit_parameters"] == settings
+        assert given["fitting_method"] == "vectorfit"
         assert len(out["locs"]) == 3
-        assert worker.vectorfit_outliers == 2
+        assert out["info"] is fit_info
 
-    def test_window_notes_the_outliers_discarded(self):
-        import types
+    def test_status_bar_notes_the_outliers_discarded(self):
+        from picasso.gui import localize as localize_gui
+
+        note = localize_gui._outliers_note([{vectorfit.OUTLIERS_KEY: 4}])
+        assert "4 outliers" in note
+        assert "0 outliers" in localize_gui._outliers_note(
+            [{vectorfit.OUTLIERS_KEY: 0}]
+        )
+        # any other fit adds no note
+        assert localize_gui._outliers_note([{"Fit method": "avg"}]) == ""
+
+    def test_saving_uses_the_fit_metadata(self):
+        """``save_locs`` writes the fit's own metadata, which already holds
+        the VectorFit settings and outliers; it must not rebuild them."""
+        import inspect
 
         from picasso.gui import localize as localize_gui
 
-        window = types.SimpleNamespace()
-        record = localize_gui.Window._record_vectorfit_outliers
-        note = record(window, types.SimpleNamespace(vectorfit_outliers=4))
-        assert window._vectorfit_outliers == 4
-        assert "4 outliers" in note
-        # any other fit's worker carries no count and adds no note
-        assert record(window, types.SimpleNamespace()) == ""
-        assert window._vectorfit_outliers is None
-        assert record(window, None) == ""
+        source = inspect.getsource(localize_gui.Window.save_locs)
+        assert "io.save_locs(path, self.locs, self.extra_info)" in source
+        assert "vectorfit" not in source
 
     def test_dialog_starts_with_the_defaults(self, qt_offscreen):
         dialog = self._dialog()
@@ -659,6 +721,19 @@ class TestGui:
 # ---------------------------------------------------------------------------
 
 
+def _fit_spots(spots, identifications, **kwargs):
+    """``vectorfit.fit_spots`` with the test's pixel size and frame."""
+    kwargs.setdefault("parameters", {"Fit model": "2D"})
+    kwargs.setdefault("n_threads", 2)
+    return vectorfit.fit_spots(
+        spots,
+        identifications,
+        pixelsize=PIXELSIZE,
+        image_shape=(64, 64),
+        **kwargs,
+    )
+
+
 @requires_vectorfit
 class TestFit:
     def test_default_schedule_is_the_library_default(self):
@@ -676,7 +751,9 @@ class TestFit:
 
     def test_aberrations_are_all_zero(self):
         """No aberration is assumed, the astigmatism included."""
-        params = vectorfit.fit_params({}, BOX, PIXELSIZE, (64, 64))
+        params = vectorfit.fit_params(
+            {}, box=BOX, pixelsize=PIXELSIZE, image_shape=(64, 64)
+        )
         gammas, orders = vectorfit._fixed_aberrations(params)
         assert not gammas.any()
         assert not orders[:, 2].any()
@@ -710,13 +787,8 @@ class TestFit:
     def test_result_layout(self, model):
         n_spots = 20
         spots, _, _ = _gaussian_spots(n_spots)
-        result = vectorfit.fit_spots(
-            spots,
-            _identifications(n_spots),
-            {"Fit model": model},
-            PIXELSIZE,
-            (64, 64),
-            n_threads=2,
+        result = _fit_spots(
+            spots, _identifications(n_spots), parameters={"Fit model": model}
         )
         n_parameters = 5 if model == "3D" else 4
         assert result["theta"].shape == (n_spots, n_parameters)
@@ -739,7 +811,11 @@ class TestFit:
         parameters = vectorfit.parameters_with_defaults({"Fit model": "2D"})
         # one fit to get model images at known parameters
         params = vectorfit.fit_params(
-            parameters, BOX, PIXELSIZE, (64, 64), n_threads=2
+            parameters,
+            box=BOX,
+            pixelsize=PIXELSIZE,
+            image_shape=(64, 64),
+            n_threads=2,
         )
         gammas, orders = vectorfit._fixed_aberrations(params)
         roi = np.stack(
@@ -762,14 +838,7 @@ class TestFit:
 
         rng = np.random.default_rng(5)
         spots = rng.poisson(mu).astype(float)
-        result = vectorfit.fit_spots(
-            spots,
-            identifications,
-            parameters,
-            PIXELSIZE,
-            (64, 64),
-            n_threads=2,
-        )
+        result = _fit_spots(spots, identifications, parameters=parameters)
         ok = ~result["outlier"]
         assert ok.mean() > 0.9
         error = (result["theta"][ok, :2] - truth[ok, :2]) / result["crlb"][
@@ -785,24 +854,22 @@ class TestFit:
         n_spots = 100
         spots, dx, dy = _gaussian_spots(n_spots)
         identifications = _identifications(n_spots)
-        result = vectorfit.fit_spots(
-            spots,
-            identifications,
-            {"Fit model": "2D"},
-            PIXELSIZE,
-            (64, 64),
-            n_threads=2,
-        )
+        result = _fit_spots(spots, identifications)
         locs = vectorfit.locs_from_fits(
             identifications,
             result,
-            PIXELSIZE,
+            pixelsize=PIXELSIZE,
             em=False,
             discard_outliers=False,
         )
-        # one spot per frame, so the frame order is the spot order
-        fit_dx = locs["x"].to_numpy() - identifications["x"].to_numpy()
-        fit_dy = locs["y"].to_numpy() - identifications["y"].to_numpy()
+        # one spot per frame, so the frame order is the spot order; the
+        # offsets from the box centers, back in camera pixels
+        fit_dx = (
+            locs["x"].to_numpy() / PIXELSIZE - identifications["x"].to_numpy()
+        )
+        fit_dy = (
+            locs["y"].to_numpy() / PIXELSIZE - identifications["y"].to_numpy()
+        )
         assert np.corrcoef(fit_dx, dx)[0, 1] > 0.95
         assert np.corrcoef(fit_dy, dy)[0, 1] > 0.95
         assert abs(np.median(fit_dx - dx)) < 0.05
@@ -813,17 +880,15 @@ class TestFit:
         n_spots = 10
         spots, _, _ = _gaussian_spots(n_spots)
         identifications = _identifications(n_spots)
-        progress = []
-        result = vectorfit.fit_spots(
-            spots,
-            identifications,
-            {"Fit model": "2D"},
-            PIXELSIZE,
-            (64, 64),
-            n_threads=1,
-            progress_callback=progress.append,
+        progress = _RecordingProgress()
+        result = _fit_spots(
+            spots, identifications, n_threads=1, progress=progress
         )
-        assert progress == [4, 8, 10]
+        assert progress.phases == ["Fitting spots"]
+        assert progress.maximum() == n_spots
+        # once per batch, ending at the maximum
+        assert progress.values[:3] == [4, 8, 10]
+        assert progress.values[-1] == n_spots
         assert len(result["theta"]) == n_spots
 
         calls = []
@@ -833,14 +898,8 @@ class TestFit:
             return len(calls) > 1  # after the first batch
 
         assert (
-            vectorfit.fit_spots(
-                spots,
-                identifications,
-                {"Fit model": "2D"},
-                PIXELSIZE,
-                (64, 64),
-                n_threads=1,
-                abort_callback=abort,
+            _fit_spots(
+                spots, identifications, n_threads=1, abort_callback=abort
             )
             is None
         )
@@ -849,61 +908,54 @@ class TestFit:
         n_spots = 12
         spots, _, _ = _gaussian_spots(n_spots)
         identifications = _identifications(n_spots)
-        kwargs = dict(
-            parameters={"Fit model": "2D"},
-            pixelsize=PIXELSIZE,
-            image_shape=(64, 64),
-            n_threads=1,
-        )
-        whole = vectorfit.fit_spots(spots, identifications, **kwargs)
+        whole = _fit_spots(spots, identifications, n_threads=1)
         monkeypatch.setattr(vectorfit, "SPOTS_PER_BATCH", 5)
-        batched = vectorfit.fit_spots(spots, identifications, **kwargs)
+        batched = _fit_spots(spots, identifications, n_threads=1)
         np.testing.assert_allclose(batched["theta"], whole["theta"])
         np.testing.assert_allclose(batched["crlb"], whole["crlb"])
 
     def test_no_spots(self):
-        result = vectorfit.fit_spots(
+        result = _fit_spots(
             np.zeros((0, BOX, BOX)),
             _identifications(0),
-            {"Fit model": "3D"},
-            PIXELSIZE,
-            (64, 64),
+            parameters={"Fit model": "3D"},
         )
         assert result["theta"].shape == (0, 5)
         locs = vectorfit.locs_from_fits(
-            _identifications(0), result, PIXELSIZE, em=False
+            _identifications(0), result, pixelsize=PIXELSIZE, em=False
         )
         assert len(locs) == 0 and "z" in locs
 
     def test_localize_agrees_with_the_gaussian_fit(self, movie):
         """On the bundled movie, the vectorial and the Gaussian fit of the
         same identifications must land on the same positions."""
-        parameters = {"Min. Net Gradient": 5000, "Box Size": BOX}
         gauss, _ = localize.localize(
             movie,
             camera_info=dict(CAMERA_INFO),
-            identification_parameters=parameters,
+            identification_parameters=_identification_parameters(),
             fitting_method="gausslq",
         )
         vector, info = localize.localize(
             movie,
             camera_info=dict(CAMERA_INFO),
-            identification_parameters=parameters,
+            identification_parameters=_identification_parameters(),
             fitting_method="vectorfit",
             vectorfit_parameters={"Discard outliers": False},
         )
         assert len(vector) == len(gauss)
-        assert info[-1]["Fit method"] == "vectorfit"
-        assert info[-1]["VectorFit Fit model"] == "3D"
+        assert lib.get_from_metadata(info, "Fit method") == "vectorfit"
+        assert lib.get_from_metadata(info, "VectorFit Fit model") == "3D"
         # all were kept
-        assert info[-1]["VectorFit outliers discarded"] == 0
+        assert vectorfit.outliers_discarded(info) == 0
         assert "z" in vector
         merged = gauss.merge(
             vector, on=["frame", "net_gradient"], suffixes=("_g", "_v")
         )
         assert len(merged) == len(gauss)
-        np.testing.assert_allclose(merged["x_v"], merged["x_g"], atol=0.05)
-        np.testing.assert_allclose(merged["y_v"], merged["y_g"], atol=0.05)
+        # within 0.05 camera pixels, in nm
+        atol = 0.05 * CAMERA_INFO["Pixelsize"]
+        np.testing.assert_allclose(merged["x_v"], merged["x_g"], atol=atol)
+        np.testing.assert_allclose(merged["y_v"], merged["y_g"], atol=atol)
 
     def test_calibration_3d_is_not_applied(self, movie):
         with warnings.catch_warnings():
@@ -911,16 +963,13 @@ class TestFit:
             locs, info = localize.localize(
                 movie,
                 camera_info=dict(CAMERA_INFO),
-                identification_parameters={
-                    "Min. Net Gradient": 5000,
-                    "Box Size": BOX,
-                },
+                identification_parameters=_identification_parameters(),
                 fitting_method="vectorfit",
                 vectorfit_parameters={"Fit model": "2D"},
                 calibration_3d={"X Coefficients": [0] * 7},
             )
         assert "z" not in locs
-        assert not any("Z Calibration" in key for key in info[-1])
+        assert lib.get_from_metadata(info, "Z Calibration") is None
 
     def test_command_line(self, tmp_path, monkeypatch, capsys):
         from picasso import __main__ as cli
@@ -942,6 +991,8 @@ class TestFit:
             "vectorfit",
             "-d",
             "0",
+            "--pixelsize",
+            str(CAMERA_INFO["Pixelsize"]),
             "--vf-model",
             "2D",
             "--vf-na",
@@ -952,14 +1003,11 @@ class TestFit:
         locs, info = io.load_locs(str(tmp_path / "movie_locs.hdf5"))
         assert len(locs)
         assert "z" not in locs
-        fit_info = next(_ for _ in info if "Fit method" in _)
-        assert fit_info["Fit method"] == "vectorfit"
-        assert fit_info["VectorFit Fit model"] == "2D"
-        assert fit_info["VectorFit NA"] == 1.4
-        assert fit_info["VectorFit outliers discarded"] >= 0
+        assert lib.get_from_metadata(info, "Fit method") == "vectorfit"
+        assert lib.get_from_metadata(info, "VectorFit Fit model") == "2D"
+        assert lib.get_from_metadata(info, "VectorFit NA") == 1.4
+        n_outliers = vectorfit.outliers_discarded(info)
+        assert n_outliers >= 0
         # and the console says so, as Vermeer does
         printed = capsys.readouterr().out
-        assert (
-            f"VectorFit discarded {fit_info['VectorFit outliers discarded']:,}"
-            " outliers" in printed
-        )
+        assert f"VectorFit discarded {n_outliers:,} outliers" in printed

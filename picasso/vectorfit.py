@@ -27,7 +27,6 @@ from typing import Callable, Literal
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 from . import lib
 
@@ -174,6 +173,7 @@ def check_box(box: int) -> None:
 
 def fit_params(
     parameters: dict,
+    *,
     box: int,
     pixelsize: float,
     image_shape: tuple[int, int],
@@ -287,18 +287,54 @@ def _log_likelihood(spots: np.ndarray, mu: np.ndarray) -> np.ndarray:
     return -np.sum(mu - spots + log_ratio, axis=1)
 
 
+def _fit_batch(
+    vectorfit_py,
+    spots: np.ndarray,
+    roi_yx: np.ndarray,
+    params,
+    gammas: np.ndarray,
+    orders: np.ndarray,
+    result: dict,
+) -> None:
+    """Fit one batch of spots with VectorFit and append its results to the
+    lists in ``result`` (see :func:`fit_spots`)."""
+    # float64 to match VectorFit's (MATLAB) double precision
+    batch = np.maximum(np.asarray(spots, np.float64), 1e-3)
+    fitter = vectorfit_py.Fitter(
+        vectorfit_py.doubleArray4D(np.ascontiguousarray(batch[..., None])),
+        vectorfit_py.doubleArray2D(np.ascontiguousarray(roi_yx)),
+        params,
+        "cpu",
+    )
+    fitter.update_zernike_coefficients(
+        vectorfit_py.doubleArray1D(gammas),
+        _aberrations(vectorfit_py, orders),
+    )
+    fitter.init()
+    fitter.update()
+    # theta also holds the fixed aberrations, after the fit parameters
+    theta = np.array(fitter.theta())[:, : -len(orders)]
+    result["theta"].append(theta)
+    result["crlb"].append(np.array(fitter.fisher_crlb()).T)
+    result["iterations"].append(np.array(fitter.num_iters()))
+    mu = np.array(fitter.mu())
+    result["log_likelihood"].append(_log_likelihood(batch, mu))
+    outlier = np.zeros(len(batch), dtype=bool)
+    outlier[np.asarray(fitter.get_outliers(), dtype=np.int64)] = True
+    result["outlier"].append(outlier)
+
+
 def fit_spots(
     spots: lib.FloatArray3D,
     identifications: pd.DataFrame,
+    *,
     parameters: dict,
     pixelsize: float,
     image_shape: tuple[int, int],
     tolerance: float | None = None,
     max_iterations: int | None = None,
     n_threads: int | None = None,
-    progress_callback: (
-        Callable[[int], None] | Literal["console"] | None
-    ) = None,
+    progress: lib.Progress | Literal["console"] | None = None,
     abort_callback: Callable[[], bool] | None = None,
 ) -> dict | None:
     """Fit a vectorial PSF model to each spot.
@@ -321,9 +357,10 @@ def fit_spots(
         Convergence schedule; None picks ``TOLERANCE`` / ``MAX_ITERATIONS``.
     n_threads : int or None, optional
         CPU threads to fit on; None uses ``lib.n_workers()``.
-    progress_callback : callable, "console" or None, optional
-        ``"console"`` shows a tqdm bar; a callable is invoked with the
-        number of spots fitted so far after every batch. Default None.
+    progress : lib.Progress, "console" or None, optional
+        Progress tracker, see ``picasso.lib.Progress``. Reports one phase,
+        "Fitting spots", over the spots, advanced after every batch.
+        Default None.
     abort_callback : callable or None, optional
         Checked before every batch; returning True stops the fit. Default
         None.
@@ -349,15 +386,14 @@ def fit_spots(
         n_threads = lib.n_workers()
     params = fit_params(
         parameters,
-        box,
-        pixelsize,
-        image_shape,
+        box=box,
+        pixelsize=pixelsize,
+        image_shape=image_shape,
         tolerance=tolerance,
         max_iterations=max_iterations,
         n_threads=n_threads,
     )
     gammas, orders = _fixed_aberrations(params)
-    n_aberrations = len(orders)
     # 1-based (y, x) of the box centers, as VectorFit indexes the frame
     roi_yx = np.stack(
         [
@@ -369,48 +405,23 @@ def fit_spots(
     n_spots = len(spots)
     keys = ("theta", "crlb", "iterations", "log_likelihood", "outlier")
     result = {key: [] for key in keys}
-    progress_bar = None
-    if progress_callback == "console":
-        progress_bar = tqdm(total=n_spots, desc="Fitting", unit="spot")
-    for start in range(0, n_spots, SPOTS_PER_BATCH):
-        if callable(abort_callback) and abort_callback():
-            if progress_bar is not None:
-                progress_bar.close()
-            return None
-        stop = min(start + SPOTS_PER_BATCH, n_spots)
-        # float64 to match VectorFit's (MATLAB) double precision
-        batch = np.maximum(np.asarray(spots[start:stop], np.float64), 1e-3)
-        fitter = vectorfit_py.Fitter(
-            vectorfit_py.doubleArray4D(np.ascontiguousarray(batch[..., None])),
-            vectorfit_py.doubleArray2D(
-                np.ascontiguousarray(roi_yx[:, start:stop])
-            ),
-            params,
-            "cpu",
-        )
-        fitter.update_zernike_coefficients(
-            vectorfit_py.doubleArray1D(gammas),
-            _aberrations(vectorfit_py, orders),
-        )
-        fitter.init()
-        fitter.update()
-        # theta also holds the fixed aberrations, after the fit parameters
-        theta = np.array(fitter.theta())[:, :-n_aberrations]
-        result["theta"].append(theta)
-        result["crlb"].append(np.array(fitter.fisher_crlb()).T)
-        result["iterations"].append(np.array(fitter.num_iters()))
-        mu = np.array(fitter.mu())
-        result["log_likelihood"].append(_log_likelihood(batch, mu))
-        outlier = np.zeros(stop - start, dtype=bool)
-        outlier[np.asarray(fitter.get_outliers(), dtype=np.int64)] = True
-        result["outlier"].append(outlier)
-
-        if progress_bar is not None:
-            progress_bar.update(stop - start)
-        elif callable(progress_callback):
-            progress_callback(stop)
-    if progress_bar is not None:
-        progress_bar.close()
+    with lib.tracked_progress(progress, "Fitting spots", "spot") as progress:
+        lib.start_phase(progress, "Fitting spots", n_spots, unit="spot")
+        for start in range(0, n_spots, SPOTS_PER_BATCH):
+            if callable(abort_callback) and abort_callback():
+                return None
+            stop = min(start + SPOTS_PER_BATCH, n_spots)
+            _fit_batch(
+                vectorfit_py,
+                spots[start:stop],
+                roi_yx[:, start:stop],
+                params,
+                gammas,
+                orders,
+                result,
+            )
+            progress.set_value(stop)
+        progress.set_value(n_spots)
     if n_spots == 0:
         n_parameters = 5 if parameters["Fit model"] == "3D" else 4
         return {
@@ -426,6 +437,7 @@ def fit_spots(
 def locs_from_fits(
     identifications: pd.DataFrame,
     result: dict,
+    *,
     pixelsize: float,
     em: bool,
     discard_outliers: bool = True,
@@ -440,8 +452,8 @@ def locs_from_fits(
     result : dict
         The output of :func:`fit_spots`.
     pixelsize : float
-        Effective camera pixel size (nm), converting the lateral results to
-        camera pixels.
+        Effective camera pixel size (nm), placing the box centers, which
+        are in camera pixels, in nm.
     em : bool
         Whether EMCCD was used. Its excess noise doubles the variance of
         every estimate, as in the other fits.
@@ -458,26 +470,30 @@ def locs_from_fits(
         The localizations, sorted by frame, with ``frame``, ``x``, ``y``,
         ``photons``, ``bg``, ``lpx``, ``lpy``, ``net_gradient``,
         ``photons_unc``, ``bg_unc``, ``log_likelihood``, ``iterations`` and
-        ``reduced_chi_square`` (with ``spots``), plus ``z`` and ``lpz``
-        (nm) for the 3D model.
+        ``reduced_chi_square`` (with ``spots``), plus ``z`` and ``lpz`` for
+        the 3D model. Every length is in nm.
     """
     from .localize import _fit_statistic_columns
 
+    pixelsize = float(pixelsize)
+    if not np.isfinite(pixelsize) or pixelsize <= 0:
+        raise ValueError(
+            f"The camera pixel size must be positive, got {pixelsize} nm."
+        )
     theta = result["theta"]
     crlb = result["crlb"] * (np.sqrt(2.0) if em else 1.0)
     is_3d = theta.shape[1] == 5
+    # VectorFit fits in nm, relative to the center of the box
+    x = theta[:, 1] + identifications["x"].to_numpy(np.float64) * pixelsize
+    y = theta[:, 0] + identifications["y"].to_numpy(np.float64) * pixelsize
     columns = {
         "frame": identifications["frame"].to_numpy().astype(np.uint32),
-        "x": (theta[:, 1] / pixelsize + identifications["x"]).astype(
-            np.float32
-        ),
-        "y": (theta[:, 0] / pixelsize + identifications["y"]).astype(
-            np.float32
-        ),
+        "x": x.astype(np.float32),
+        "y": y.astype(np.float32),
         "photons": theta[:, -2].astype(np.float32),
         "bg": theta[:, -1].astype(np.float32),
-        "lpx": (crlb[:, 1] / pixelsize).astype(np.float32),
-        "lpy": (crlb[:, 0] / pixelsize).astype(np.float32),
+        "lpx": crlb[:, 1].astype(np.float32),
+        "lpy": crlb[:, 0].astype(np.float32),
         **lib.net_gradient_column(identifications),
     }
     if is_3d:

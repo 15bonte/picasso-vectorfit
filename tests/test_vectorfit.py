@@ -6,7 +6,6 @@ the settings, the conversion to localizations and the wiring into
 ``localize``, the command line and the GUI are tested either way.
 
 :author: Thomas Bonte, 2026
-:copyright: Copyright (c) 2026 Jungmann Lab, MPI of Biochemistry
 """
 
 from __future__ import annotations

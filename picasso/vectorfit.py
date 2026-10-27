@@ -8,15 +8,13 @@ picassosr[vectorfit]``).
 
 The vectorial model describes the PSF from the optics (numerical aperture,
 emission wavelength, refractive indices) rather than from a measured
-calibration, and recovers ``z`` directly for the 3D model. Aberrations are
-fixed (``*_constaberrations`` models of VectorFit) at 0.
+calibration, and recovers ``z`` directly for the 3D model.
 
 The spots are fitted in batches; within a batch VectorFit parallelizes over
 its own threads, so no worker processes are started here. Only the CPU
 build of VectorFit is supported so far.
 
 :author: Thomas Bonte, 2026
-:copyright: Copyright (c) 2026 Jungmann Lab, MPI of Biochemistry
 """
 
 from __future__ import annotations

@@ -60,25 +60,44 @@ _MODELS = {"2D": "xy_constaberrations", "3D": "xyz_constaberrations"}
 #:   "Refractive index immersion": of the sample medium, the cover slip
 #:   and the immersion fluid.
 #: - "Working distance": of the objective (um).
+#: - "Vertical astigmatism" (Z_2^2), "Oblique astigmatism" (Z_2^-2): fixed
+#:   primary aberrations, in milli-wavelengths (mλ).
+#: - "Horizontal coma" (Z_3^1), "Vertical coma" (Z_3^-1), "Spherical
+#:   aberration" (Z_4^0): fixed primary aberrations (nm).
 #: - "Discard outliers": drop the spots VectorFit flags as outliers (not
 #:   converged, final merit more than 3 standard deviations below the
 #:   batch mean, or fitted position far from the box center), as its own
 #:   ``localize`` script does. ``localize.fit`` records how many were
 #:   discarded in the metadata, as "VectorFit outliers discarded".
 DEFAULT_PARAMETERS = {
-    "Fit model": "3D",
+    "Fit model": "2D",
     "Wavelength": 680.0,
     "NA": 1.5,
     "Refractive index medium": 1.406,
     "Refractive index cover slip": 1.525,
     "Refractive index immersion": 1.515,
     "Working distance": 150.0,
+    "Vertical astigmatism": 0.0,
+    "Oblique astigmatism": 0.0,
+    "Horizontal coma": 0.0,
+    "Vertical coma": 0.0,
+    "Spherical aberration": 0.0,
     "Discard outliers": True,
 }
 
 #: Number of VectorFit's Legendre (nodal aberration theory) coefficients
 #: for ``NAT_order=1``.
 _N_LEGENDRE = 13
+
+#: Index of each primary aberration among the Legendre coefficients, and
+#: whether its setting is in milli-wavelengths (else in nm).
+_PRIMARY_ABERRATIONS = {
+    "Vertical astigmatism": (4, True),
+    "Oblique astigmatism": (5, True),
+    "Horizontal coma": (9, False),
+    "Vertical coma": (10, False),
+    "Spherical aberration": (12, False),
+}
 
 
 #: Metadata key ``localize.fit`` records the number of discarded outliers
@@ -266,13 +285,28 @@ def _aberrations(vectorfit_py, orders: np.ndarray):
     return aberrations
 
 
-def _fixed_aberrations(params) -> tuple[np.ndarray, np.ndarray]:
-    """The constant aberrations of the fit, all 0: the Legendre
-    coefficients (``gammas``) and the ``(n, 3)`` Zernike aberrations
-    (radial order, azimuthal order, coefficient) of the model."""
+def _fixed_aberrations(
+    vectorfit_py, params, parameters: dict
+) -> tuple[np.ndarray, np.ndarray]:
+    """The constant aberrations of the fit, set by the primary aberrations
+    of ``parameters``: the Legendre coefficients (``gammas``, nm) and the
+    ``(n, 3)`` Zernike aberrations (radial order, azimuthal order,
+    coefficient) of the model."""
     gammas = np.zeros(_N_LEGENDRE)
+    for key, (index, in_milli_wavelengths) in _PRIMARY_ABERRATIONS.items():
+        gammas[index] = parameters[key]
+        if in_milli_wavelengths:
+            gammas[index] *= params.Lambda * 1e-3  # mλ -> nm
     orders = np.array(params.InitialAberrationOrders, dtype=np.float64)
-    orders[:, 2] = 0
+    # the Zernike coefficients the Legendre ones give
+    orders[:, 2] = np.array(
+        vectorfit_py.compute_xy_gamma_legendre(
+            vectorfit_py.doubleArray1D(1),
+            vectorfit_py.doubleArray1D(1),
+            vectorfit_py.doubleArray1D(gammas),
+            _aberrations(vectorfit_py, orders),
+        )
+    )[0]
     return gammas, orders
 
 
@@ -393,7 +427,7 @@ def fit_spots(
         max_iterations=max_iterations,
         n_threads=n_threads,
     )
-    gammas, orders = _fixed_aberrations(params)
+    gammas, orders = _fixed_aberrations(vectorfit_py, params, parameters)
     # 1-based (y, x) of the box centers, as VectorFit indexes the frame
     roi_yx = np.stack(
         [

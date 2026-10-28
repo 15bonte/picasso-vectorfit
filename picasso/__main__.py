@@ -1848,6 +1848,11 @@ _VECTORFIT_ARGS = {
     "vf_n_coverslip": "Refractive index cover slip",
     "vf_n_immersion": "Refractive index immersion",
     "vf_working_distance": "Working distance",
+    "vf_vertical_astigmatism": "Vertical astigmatism",
+    "vf_oblique_astigmatism": "Oblique astigmatism",
+    "vf_horizontal_coma": "Horizontal coma",
+    "vf_vertical_coma": "Vertical coma",
+    "vf_spherical_aberration": "Spherical aberration",
 }
 
 
@@ -1859,7 +1864,7 @@ def _add_vectorfit_args(parser: argparse.ArgumentParser) -> None:
         "--vf-model",
         choices=["2D", "3D"],
         default=None,
-        help="VectorFit: fit model, 3D also fits z (default 3D)",
+        help="VectorFit: fit model, 3D also fits z (default 2D)",
     )
     for flag, text in (
         ("--vf-wavelength", "emission wavelength in nm (default 680)"),
@@ -1879,6 +1884,25 @@ def _add_vectorfit_args(parser: argparse.ArgumentParser) -> None:
         (
             "--vf-working-distance",
             "working distance of the objective in um (default 150)",
+        ),
+        (
+            "--vf-vertical-astigmatism",
+            "fixed vertical astigmatism Z_2^2 in milli-wavelengths "
+            "(default 0)",
+        ),
+        (
+            "--vf-oblique-astigmatism",
+            "fixed oblique astigmatism Z_2^-2 in milli-wavelengths "
+            "(default 0)",
+        ),
+        (
+            "--vf-horizontal-coma",
+            "fixed horizontal coma Z_3^1 in nm (default 0)",
+        ),
+        ("--vf-vertical-coma", "fixed vertical coma Z_3^-1 in nm (default 0)"),
+        (
+            "--vf-spherical-aberration",
+            "fixed spherical aberration Z_4^0 in nm (default 0)",
         ),
     ):
         parser.add_argument(

@@ -4076,12 +4076,17 @@ def fit(
         Optical and model settings of the "vectorfit" method; missing
         ones take their defaults:
 
-        - "Fit model": "2D" or "3D" (also fits ``z``), default "3D";
+        - "Fit model": "2D" or "3D" (also fits ``z``), default "2D";
         - "Wavelength": emission wavelength in nm, default 680;
         - "NA": numerical aperture, default 1.5;
         - "Refractive index medium", "Refractive index cover slip",
           "Refractive index immersion": defaults 1.406, 1.525, 1.515;
         - "Working distance": of the objective in um, default 150;
+        - "Vertical astigmatism" (Z_2^2), "Oblique astigmatism" (Z_2^-2):
+          fixed primary aberrations in milli-wavelengths, default 0;
+        - "Horizontal coma" (Z_3^1), "Vertical coma" (Z_3^-1),
+          "Spherical aberration" (Z_4^0): fixed primary aberrations in
+          nm, default 0;
         - "Discard outliers": drop the spots VectorFit flags as outliers,
           default True.
 

@@ -157,11 +157,14 @@ class TestParameters:
         with pytest.raises(ValueError, match="Wavelenght"):
             vectorfit.parameters_with_defaults({"Wavelenght": 600})
 
-    def test_astigmatism_is_not_a_setting(self):
-        """Aberrations stay at 0, so none of them can be set."""
-        assert "Astigmatism" not in vectorfit.DEFAULT_PARAMETERS
-        with pytest.raises(ValueError, match="Astigmatism"):
-            vectorfit.parameters_with_defaults({"Astigmatism": 100})
+    def test_primary_aberrations_default_to_zero(self):
+        for key in vectorfit._PRIMARY_ABERRATIONS:
+            assert vectorfit.DEFAULT_PARAMETERS[key] == 0
+
+    @pytest.mark.parametrize("key", list(vectorfit._PRIMARY_ABERRATIONS))
+    def test_aberrations_can_be_negative(self, key):
+        parameters = vectorfit.parameters_with_defaults({key: -25.0})
+        assert parameters[key] == -25.0
 
     def test_unknown_model_is_rejected(self):
         with pytest.raises(ValueError, match="Fit model"):
@@ -513,6 +516,10 @@ class TestCommandLine:
                 "1.27",
                 "--vf-wavelength",
                 "600",
+                "--vf-vertical-astigmatism",
+                "-20",
+                "--vf-spherical-aberration",
+                "15",
                 "--vf-keep-outliers",
             ]
         )
@@ -521,6 +528,8 @@ class TestCommandLine:
             "Fit model": "2D",
             "NA": 1.27,
             "Wavelength": 600.0,
+            "Vertical astigmatism": -20.0,
+            "Spherical aberration": 15.0,
             "Discard outliers": False,
         }
         # every option maps onto a real setting
@@ -741,6 +750,11 @@ class TestGui:
             "Refractive index cover slip": 1.52,
             "Refractive index immersion": 1.33,
             "Working distance": 280.0,
+            "Vertical astigmatism": -60.5,
+            "Oblique astigmatism": 30.0,
+            "Horizontal coma": -12.0,
+            "Vertical coma": 8.25,
+            "Spherical aberration": -40.0,
             "Discard outliers": False,
         }
         dialog = self._dialog()
@@ -787,18 +801,30 @@ class TestFit:
         assert params.Tollim == vectorfit.TOLERANCE
         assert params.NiterMax == vectorfit.MAX_ITERATIONS
 
-    def test_aberrations_are_all_zero(self):
-        """No aberration is assumed, the astigmatism included."""
+    def test_primary_aberrations_set_their_coefficients(self):
+        """Astigmatism is given in milli-wavelengths, the others in nm."""
+        import vectorfit_py
+
+        parameters = vectorfit.parameters_with_defaults(
+            {
+                "Wavelength": 600.0,
+                "Vertical astigmatism": 50.0,
+                "Oblique astigmatism": -25.0,
+                "Horizontal coma": 10.0,
+                "Vertical coma": -20.0,
+                "Spherical aberration": 30.0,
+            }
+        )
         params = vectorfit.fit_params(
-            {}, box=BOX, pixelsize=PIXELSIZE, image_shape=(64, 64)
+            parameters, box=BOX, pixelsize=PIXELSIZE, image_shape=(64, 64)
         )
-        gammas, orders = vectorfit._fixed_aberrations(params)
-        assert not gammas.any()
-        assert not orders[:, 2].any()
-        # the Zernike orders of the model are kept
-        np.testing.assert_array_equal(
-            orders[:, :2], np.array(params.InitialAberrationOrders)[:, :2]
+        gammas, orders = vectorfit._fixed_aberrations(
+            vectorfit_py, params, parameters
         )
+        expected = np.zeros(vectorfit._N_LEGENDRE)
+        expected[[4, 5, 9, 10, 12]] = [30.0, -15.0, 10.0, -20.0, 30.0]
+        np.testing.assert_allclose(gammas, expected)
+        assert orders[:, 2].any()
 
     def test_fit_params_carry_the_settings(self):
         params = vectorfit.fit_params(
@@ -855,7 +881,9 @@ class TestFit:
             image_shape=(64, 64),
             n_threads=2,
         )
-        gammas, orders = vectorfit._fixed_aberrations(params)
+        gammas, orders = vectorfit._fixed_aberrations(
+            vectorfit_py, params, parameters
+        )
         roi = np.stack(
             [identifications["y"] + 1.0, identifications["x"] + 1.0]
         )
@@ -982,10 +1010,10 @@ class TestFit:
         )
         assert len(vector) == len(gauss)
         assert lib.get_from_metadata(info, "Fit method") == "vectorfit"
-        assert lib.get_from_metadata(info, "VectorFit Fit model") == "3D"
+        assert lib.get_from_metadata(info, "VectorFit Fit model") == "2D"
         # all were kept
         assert vectorfit.outliers_discarded(info) == 0
-        assert "z" in vector
+        assert "z" not in vector
         merged = gauss.merge(
             vector, on=["frame", "net_gradient"], suffixes=("_g", "_v")
         )

@@ -4792,6 +4792,24 @@ class ParametersDialog(lib.Dialog):
                 "Working distance of the objective.",
             ),
         ]
+        # fixed primary aberrations; astigmatism in milli-wavelengths
+        for key, zernike, unit in (
+            ("Vertical astigmatism", "Z<sub>2</sub><sup>2</sup>", "mλ"),
+            ("Oblique astigmatism", "Z<sub>2</sub><sup>−2</sup>", "mλ"),
+            ("Horizontal coma", "Z<sub>3</sub><sup>1</sup>", "nm"),
+            ("Vertical coma", "Z<sub>3</sub><sup>−1</sup>", "nm"),
+            ("Spherical aberration", "Z<sub>4</sub><sup>0</sup>", "nm"),
+        ):
+            spinboxes.append(
+                (
+                    key,
+                    f"{key} {zernike} ({unit}):",
+                    (-1000, 1000),
+                    3,
+                    1,
+                    "Fixed aberration of the PSF model; it is not fitted.",
+                )
+            )
         vectorfit_grid.addWidget(QtWidgets.QLabel("Fit model:"), 0, 0)
         vectorfit_grid.addWidget(self.vectorfit_model, 0, 1)
         self.vectorfit_spinboxes = {}

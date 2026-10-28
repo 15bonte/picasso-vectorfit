@@ -32,9 +32,11 @@ from . import lib
 #: them, so that importing Picasso stays fast without VectorFit.
 VECTORFIT_AVAILABLE = importlib.util.find_spec("vectorfit_py") is not None
 
-#: Default convergence schedule, the defaults of ``vectorfit_py.FitParams``.
-TOLERANCE = 1e-6
-MAX_ITERATIONS = 30
+#: Default convergence schedule, Vermeer's. Tighter than the defaults of
+#: ``vectorfit_py.FitParams`` (1e-6, 30), which stop small boxes after a
+#: single iteration, far from the optimum.
+TOLERANCE = 5e-10
+MAX_ITERATIONS = 20
 
 #: Spots handed to VectorFit at once; bounds the memory of one batch and
 #: sets how often progress is reported and an abort is checked.

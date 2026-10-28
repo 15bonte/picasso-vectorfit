@@ -557,6 +557,11 @@ _CONVERGENCE_DEFAULTS["vectorfit"] = (
     vectorfit.MAX_ITERATIONS,
 )
 _CONVERGENCE_CODES = frozenset(_CONVERGENCE_DEFAULTS)
+# Smallest convergence criterion offered: below ~1e-6 the test on the
+# chi-square answers its noise rather than convergence. VectorFit has its
+# own test, whose default (vectorfit.TOLERANCE) lies far below.
+_CONVERGENCE_MINIMUM = 1e-6
+_CONVERGENCE_MINIMUMS = {"vectorfit": 1e-12}
 
 
 # Steps allotted to each file in the load progress dialog, so the bar can
@@ -1442,6 +1447,39 @@ class OddSpinBox(QtWidgets.QSpinBox):
         value = self.value()
         if value % 2 == 0:
             self.setValue(int(value + 1))
+
+
+class ToleranceSpinBox(QtWidgets.QDoubleSpinBox):
+    """Spinbox for a convergence tolerance, which may span many orders of
+    magnitude: shown in the shortest notation (``0.01``, ``5e-10``),
+    typed in either, and stepped by factors of 10."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # enough decimals that Qt's rounding keeps the smallest tolerances
+        self.setDecimals(15)
+
+    def textFromValue(self, value: float) -> str:
+        return f"{value:g}"
+
+    def valueFromText(self, text: str) -> float:
+        return float(text.replace(",", "."))
+
+    def validate(self, text: str, pos: int):
+        State = QtGui.QValidator.State
+        try:
+            value = self.valueFromText(text)
+        except ValueError:
+            # a number still being typed, e.g. "5e-"
+            partial = all(_ in "0123456789.,eE+-" for _ in text)
+            state = State.Intermediate if partial else State.Invalid
+            return state, text, pos
+        if self.minimum() <= value <= self.maximum():
+            return State.Acceptable, text, pos
+        return State.Intermediate, text, pos
+
+    def stepBy(self, steps: int) -> None:
+        self.setValue(self.value() * 10.0**steps)
 
 
 class CamSettingComboBox(QtWidgets.QComboBox):
@@ -3682,7 +3720,7 @@ class ParametersDialog(lib.Dialog):
         Combo box for selecting the camera.
     cam_combos : CamSettingComboBoxDict
         Combo boxes for selecting channels.
-    convergence_criterion : QtWidgets.QDoubleSpinBox
+    convergence_criterion : ToleranceSpinBox
         Spin box for setting the convergence criterion. Only used for
         MLE fitting.
     emission_combos : EmissionSettingComboBoxDict
@@ -4510,13 +4548,11 @@ class ParametersDialog(lib.Dialog):
             " its own magnitude."
         )
         mle_grid.addWidget(cc_label, 0, 0)
-        self.convergence_criterion = QtWidgets.QDoubleSpinBox()
-        # Never 0: fit requires a positive tolerance, and below ~1e-6 the
-        # test is answering noise in the chi-square rather than convergence.
-        self.convergence_criterion.setRange(1e-6, 1e6)
-        self.convergence_criterion.setDecimals(6)
+        self.convergence_criterion = ToleranceSpinBox()
+        # Never 0: fit requires a positive tolerance. The minimum depends on
+        # the method, see _CONVERGENCE_MINIMUM.
+        self.convergence_criterion.setRange(_CONVERGENCE_MINIMUM, 1e6)
         self.convergence_criterion.setValue(0.001)
-        self.convergence_criterion.setSingleStep(0.0001)
         mle_grid.addWidget(self.convergence_criterion, 0, 1)
         mi_label = QtWidgets.QLabel("Max. iterations:")
         mi_label.setToolTip("Maximum number of iterations per spot.")
@@ -5205,6 +5241,9 @@ class ParametersDialog(lib.Dialog):
         if not code:
             return
         self.fit_stack.setCurrentIndex(1 if code in _CONVERGENCE_CODES else 0)
+        self.convergence_criterion.setMinimum(
+            _CONVERGENCE_MINIMUMS.get(code, _CONVERGENCE_MINIMUM)
+        )
         if code == self._last_fit_code:
             return
         self._last_fit_code = code

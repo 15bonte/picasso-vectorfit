@@ -586,6 +586,8 @@ class TestGui:
         assert "\n\nVectorial PSF (VectorFit):\n" in localize_gui.MODEL_TOOLTIP
 
     def test_selecting_it_shows_its_settings(self, qt_offscreen):
+        from picasso.gui import localize as localize_gui
+
         dialog = self._dialog()
         try:
             dialog.show()
@@ -606,6 +608,7 @@ class TestGui:
                 vectorfit.TOLERANCE
             )
             assert dialog.max_it.value() == vectorfit.MAX_ITERATIONS
+            assert dialog.convergence_criterion.text() == "5e-10"
 
             dialog.fit_model.setCurrentIndex(
                 dialog.fit_model.findText("Average of ROI")
@@ -615,8 +618,46 @@ class TestGui:
             dialog.fit_model.setCurrentIndex(0)
             assert not dialog.vectorfit_groupbox.isVisible()
             assert dialog.z_groupbox.isVisible()
+            # the other methods keep their own minimum and schedule
+            code = dialog.current_fit_code()
+            assert dialog.convergence_criterion.minimum() == pytest.approx(
+                localize_gui._CONVERGENCE_MINIMUM
+            )
+            assert dialog.convergence_criterion.value() == pytest.approx(
+                localize_gui._CONVERGENCE_DEFAULTS[code][0]
+            )
         finally:
             dialog.deleteLater()
+
+    def test_tolerance_box_takes_small_values(self, qt_offscreen):
+        """The convergence box shows, takes and steps tolerances over many
+        orders of magnitude."""
+        from PyQt6 import QtGui
+
+        from picasso.gui import localize as localize_gui
+
+        box = localize_gui.ToleranceSpinBox()
+        try:
+            box.setRange(1e-12, 1e6)
+            box.setValue(5e-10)
+            assert box.value() == pytest.approx(5e-10)
+            assert box.text() == "5e-10"
+            box.setValue(0.01)
+            assert box.text() == "0.01"
+            assert box.valueFromText("1e-9") == pytest.approx(1e-9)
+            assert box.valueFromText("0,5") == pytest.approx(0.5)
+            State = QtGui.QValidator.State
+            assert box.validate("1e-9", 0)[0] == State.Acceptable
+            assert box.validate("1e-", 0)[0] == State.Intermediate
+            assert box.validate("1e-15", 0)[0] == State.Intermediate
+            assert box.validate("abc", 0)[0] == State.Invalid
+            box.setValue(1e-6)
+            box.stepBy(-1)
+            assert box.value() == pytest.approx(1e-7)
+            box.stepBy(2)
+            assert box.value() == pytest.approx(1e-5)
+        finally:
+            box.deleteLater()
 
     def test_worker_forwards_the_settings(self, monkeypatch):
         """The worker hands the dialog's settings to the fit and passes the
@@ -735,15 +776,13 @@ def _fit_spots(spots, identifications, **kwargs):
 
 @requires_vectorfit
 class TestFit:
-    def test_default_schedule_is_the_library_default(self):
-        """``TOLERANCE`` / ``MAX_ITERATIONS`` are repeated here so that the
-        GUI can show them without importing the bindings."""
-        import vectorfit_py
-
-        params = vectorfit_py.FitParams(
-            vectorfit_py.FitParams.get_fitmodel_from_string(
-                "xy_constaberrations"
-            )
+    def test_default_schedule_is_vermeers(self):
+        """Vermeer's schedule, so that both fit the same; the library's
+        own (1e-6, 30) stops small boxes after one iteration."""
+        assert vectorfit.TOLERANCE == 5e-10
+        assert vectorfit.MAX_ITERATIONS == 20
+        params = vectorfit.fit_params(
+            {}, box=BOX, pixelsize=PIXELSIZE, image_shape=(32, 32)
         )
         assert params.Tollim == vectorfit.TOLERANCE
         assert params.NiterMax == vectorfit.MAX_ITERATIONS

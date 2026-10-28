@@ -4059,12 +4059,12 @@ def fit(
         picks the value that suits the method: 0.001 for "gaussmle",
         0.01 for "gausslq" and the GPU Gaussians, for either spline
         backend 1e-4 with the axial multi-start and 1e-2 without, and
-        1e-6 for "vectorfit".
+        5e-10 for "vectorfit".
     max_it : int or None, optional
         The maximum number of iterations per spot, as ``eps``. None (the
         default) means 100 for "gaussmle", 200 for "gausslq" (MINPACK's
         own default), 20 for the GPU Gaussians, for either spline
-        backend 100 with the axial multi-start and 20 without, and 30 for
+        backend 100 with the axial multi-start and 20 without, and 20 for
         "vectorfit".
     spline_calibration : dict or None, optional
         Cubic-spline PSF calibration (see ``io.load_spline_calibration``),

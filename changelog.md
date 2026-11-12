@@ -1,6 +1,6 @@
 # Changelog
 
-Last change: 09-NOV-2026 CEST
+Last change: 12-NOV-2026 CET
 
 ## 1.0.0
 
@@ -122,7 +122,7 @@ Picasso 1.0 is the largest update since Picasso was first published. The highlig
 
 ### Localize
 - **Multi-emitter fitting:** the new fit model *Overlapping emitters (3D-DAOSTORM)* localizes emitters closer than about 2 PSF σ in the same frame separately. The 3D-DAOSTORM analysis of Babcock et al. (*Optical Nanoscopy* 2012), ported from storm-analysis. See the [documentation](https://picassosr.readthedocs.io/en/latest/localize/multi-emitter.html).
-- New PSF model *Vectorial PSF* ([VectorFit](https://doi.org/10.1364/OPTICA.560721)): maximum-likelihood fitting of a vectorial PSF computed from the optics, in 2D or 3D, with the optional VectorFit library (Windows and Linux only). See the [documentation](https://picassosr.readthedocs.io/en/latest/localize/vectorfit.html).
+- New PSF model *Vectorial PSF* ([VectorFit](https://doi.org/10.1364/OPTICA.560721)): maximum-likelihood fitting of a vectorial PSF computed from the optics, in 2D or 3D, with the optional VectorFit library (Windows and Linux only). See the [documentation](https://picassosr.readthedocs.io/en/latest/localize/vectorfit.html), optionally with field-dependent aberrations estimated from the data itself (*Estimate field-dependent aberrations from the data*, `--vf-estimate-aberrations`; needs vectorfit-py 0.4.0).
 - New fitting method *Phasor (pSMLM)* (Martens et al., *J. Chem. Phys.* 2018). See the [documentation](https://picassosr.readthedocs.io/en/latest/localize/phasor.html).
 - New spot identification method: B-spline wavelet segmentation (Izeddin et al., *Opt. Express* 2012), see the [documentation](https://picassosr.readthedocs.io/en/latest/localize/identification.html#localize-wavelet).
 - New column `reduced_chi_square` for MLE and least-squares fits: the goodness of fit normalized for the box size and the photon counts, about 1 for a good fit (`picasso.localize.reduced_chi_square`).

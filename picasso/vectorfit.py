@@ -106,6 +106,14 @@ _MODELS = {"2D": "xy_constaberrations", "3D": "xyz_constaberrations"}
 #:   batch mean, or fitted position far from the box center), as its own
 #:   ``localize`` script does. ``localize.fit`` records how many were
 #:   discarded in the metadata, as "VectorFit outliers discarded".
+#: - "Estimate aberrations": estimate the field-dependent aberrations from
+#:   the spots before the fit (see ``picasso.vectorfit_aberrations``), as
+#:   VectorFit's ``estimate_aberrations`` script does, instead of using
+#:   the fixed primary aberrations above, which then only serve as initial
+#:   values. ``localize.fit`` records the estimate in the metadata, as
+#:   "VectorFit estimated aberrations".
+#: - "Aberration estimation spots": number of spots, selected uniformly
+#:   over the field of view, the estimation uses.
 DEFAULT_PARAMETERS = {
     "Fit model": "2D",
     "Wavelength": 680.0,
@@ -119,11 +127,38 @@ DEFAULT_PARAMETERS = {
     "Vertical coma": 0.0,
     "Spherical aberration": 0.0,
     "Discard outliers": True,
+    "Estimate aberrations": False,
+    "Aberration estimation spots": 1000,
 }
 
 #: Number of VectorFit's Legendre (nodal aberration theory) coefficients
 #: for ``NAT_order=1``.
 _N_LEGENDRE = 13
+
+#: What each of VectorFit's Legendre coefficients ("gammas") describes:
+#: the Zernike aberration it contributes to and how that varies over the
+#: normalized field coordinates (x, y in [-1, 1]; VectorFit's x is the
+#: first axis of the frame, i.e. Picasso's y). Constant ones are the
+#: average aberration over the field of view.
+LEGENDRE_LABELS = (
+    "Defocus",
+    "Defocus, linear in x",
+    "Defocus, linear in y",
+    "Field curvature",
+    "Vertical astigmatism",
+    "Oblique astigmatism",
+    "Astigmatism, linear: x*Z(2,2) + y*Z(2,-2)",
+    "Astigmatism, linear: x*Z(2,-2) - y*Z(2,2)",
+    "Astigmatism, quadratic",
+    "Horizontal coma",
+    "Vertical coma",
+    "Coma, linear: x*Z(3,1) + y*Z(3,-1)",
+    "Spherical aberration",
+)
+
+#: Metadata key ``localize.fit`` records an aberration estimate under: the
+#: Legendre coefficients (nm) keyed by ``LEGENDRE_LABELS``.
+ESTIMATED_ABERRATIONS_KEY = "VectorFit estimated aberrations"
 
 #: Index of each primary aberration among the Legendre coefficients.
 _PRIMARY_ABERRATIONS = {
@@ -371,6 +406,17 @@ def parameters_with_defaults(parameters: dict | None = None) -> dict:
     ):
         if not parameters[key] > 0:
             raise ValueError(f"VectorFit '{key}' must be positive.")
+    if not isinstance(parameters["Estimate aberrations"], (bool, np.bool_)):
+        raise ValueError(
+            "VectorFit 'Estimate aberrations' must be True or False."
+        )
+    spots = parameters["Aberration estimation spots"]
+    if isinstance(spots, bool) or not float(spots).is_integer() or spots < 50:
+        raise ValueError(
+            "VectorFit 'Aberration estimation spots' must be an integer of "
+            "at least 50."
+        )
+    parameters["Aberration estimation spots"] = int(spots)
     if parameters["Fit model"] == "3D" and not z_measurable(parameters):
         raise ValueError(
             "The VectorFit 3D model needs the vertical or oblique "
@@ -420,6 +466,7 @@ def fit_params(
     tolerance: float | None = None,
     max_iterations: int | None = None,
     n_threads: int = 1,
+    model: str | None = None,
 ):
     """Build the ``vectorfit_py.FitParams`` of a fit.
 
@@ -437,6 +484,10 @@ def fit_params(
         Convergence schedule; None picks ``TOLERANCE`` / ``MAX_ITERATIONS``.
     n_threads : int, optional
         Number of CPU threads VectorFit fits on. Default 1.
+    model : str or None, optional
+        VectorFit fit model, overriding the one of ``parameters["Fit
+        model"]`` (e.g. "xyz_aberrations" for the aberration estimation).
+        Default None.
 
     Returns
     -------
@@ -447,7 +498,7 @@ def fit_params(
     check_box(box)
     params = vectorfit_py.FitParams(
         vectorfit_py.FitParams.get_fitmodel_from_string(
-            _MODELS[parameters["Fit model"]]
+            _MODELS[parameters["Fit model"]] if model is None else model
         )
     )
     params.imgSizeY, params.imgSizeX = (int(_) for _ in image_shape)
@@ -578,6 +629,18 @@ def _fit_batch(
     result["outlier"].append(outlier)
 
 
+def box_centers(identifications: pd.DataFrame) -> np.ndarray:
+    """``(2, n)`` 1-based (y, x) of the box centers of the
+    identifications (camera pixels), as VectorFit indexes the frame: its
+    x axis is the first axis of the frame, Picasso's y."""
+    return np.stack(
+        [
+            identifications["y"].to_numpy(dtype=np.float64) + 1,
+            identifications["x"].to_numpy(dtype=np.float64) + 1,
+        ]
+    )
+
+
 def fit_spots(
     spots: lib.FloatArray3D,
     identifications: pd.DataFrame,
@@ -591,6 +654,7 @@ def fit_spots(
     use_gpu: bool = False,
     progress: lib.Progress | Literal["console"] | None = None,
     abort_callback: Callable[[], bool] | None = None,
+    gammas: np.ndarray | None = None,
 ) -> dict | None:
     """Fit a vectorial PSF model to each spot, on the CPU or the GPU.
 
@@ -622,6 +686,11 @@ def fit_spots(
     abort_callback : callable or None, optional
         Checked before every batch; returning True stops the fit. Default
         None.
+    gammas : np.ndarray or None, optional
+        The 13 Legendre coefficients (nm, see ``LEGENDRE_LABELS``) of
+        field-dependent aberrations, e.g. estimated by
+        ``vectorfit_aberrations.estimate_aberrations``, used instead of
+        the fixed primary aberrations of ``parameters``. Default None.
 
     Returns
     -------
@@ -658,14 +727,16 @@ def fit_spots(
         max_iterations=max_iterations,
         n_threads=n_threads,
     )
-    gammas, orders = _fixed_aberrations(vectorfit_py, params, parameters)
-    # 1-based (y, x) of the box centers, as VectorFit indexes the frame
-    roi_yx = np.stack(
-        [
-            identifications["y"].to_numpy(dtype=np.float64) + 1,
-            identifications["x"].to_numpy(dtype=np.float64) + 1,
-        ]
-    )
+    fixed, orders = _fixed_aberrations(vectorfit_py, params, parameters)
+    if gammas is None:
+        gammas = fixed
+    else:
+        gammas = np.asarray(gammas, dtype=np.float64)
+        if gammas.shape != (_N_LEGENDRE,) or not np.all(np.isfinite(gammas)):
+            raise ValueError(
+                f"gammas must be {_N_LEGENDRE} finite Legendre coefficients."
+            )
+    roi_yx = box_centers(identifications)
 
     n_spots = len(spots)
     keys = ("theta", "crlb", "iterations", "log_likelihood", "outlier")

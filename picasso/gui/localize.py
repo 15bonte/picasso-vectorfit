@@ -6321,11 +6321,13 @@ class ParametersDialog(lib.Dialog):
         vectorfit_grid.addWidget(self.vectorfit_model, 0, 1)
         vectorfit_grid.addWidget(lib.HelpButton(self.VECTORFIT_URL), 0, 2)
         self.vectorfit_spinboxes = {}
+        self.vectorfit_labels = {}
         for row, (key, text, (low, high), decimals, step, tip) in enumerate(
             spinboxes, start=1
         ):
             label = QtWidgets.QLabel(text)
             label.setToolTip(tip)
+            self.vectorfit_labels[key] = label
             vectorfit_grid.addWidget(label, row, 0)
             spinbox = QtWidgets.QDoubleSpinBox()
             spinbox.setRange(low, high)
@@ -6351,7 +6353,54 @@ class ParametersDialog(lib.Dialog):
         vectorfit_grid.addWidget(
             self.vectorfit_outliers_checkbox, len(spinboxes) + 1, 0, 1, 2
         )
+        # field-dependent aberrations estimated from the data, instead of
+        # the fixed primary aberrations above
+        self.vectorfit_estimate_checkbox = QtWidgets.QCheckBox(
+            "Estimate field-dependent aberrations from the data"
+        )
+        self.vectorfit_estimate_checkbox.setToolTip(
+            "Before the fit, estimate how the aberrations vary over the\n"
+            "field of view from a selection of the spots (VectorFit's\n"
+            "nodal aberration theory estimation, Droste et al., Optica\n"
+            "2025), and fit every spot with the aberrations at its\n"
+            "position. The aberrations above are then only initial\n"
+            "values; the largest of the astigmatisms and the spherical\n"
+            "aberration keeps its sign, which sets the sign of z.\n"
+            "The estimate is saved in the metadata."
+        )
+        self.vectorfit_estimate_checkbox.setChecked(
+            defaults["Estimate aberrations"]
+        )
+        self.vectorfit_estimate_checkbox.toggled.connect(
+            self.update_vectorfit_estimate
+        )
+        vectorfit_grid.addWidget(
+            self.vectorfit_estimate_checkbox, len(spinboxes) + 2, 0, 1, 2
+        )
+        self.vectorfit_estimate_spots_label = QtWidgets.QLabel(
+            "Spots for the estimation:"
+        )
+        self.vectorfit_estimate_spots = QtWidgets.QSpinBox()
+        self.vectorfit_estimate_spots.setRange(50, 100_000)
+        self.vectorfit_estimate_spots.setSingleStep(100)
+        self.vectorfit_estimate_spots.setValue(
+            defaults["Aberration estimation spots"]
+        )
+        spots_tip = (
+            "Number of spots, selected uniformly over the field of view,\n"
+            "the aberrations are estimated from. More spots give a more\n"
+            "precise estimate, at the cost of time."
+        )
+        self.vectorfit_estimate_spots_label.setToolTip(spots_tip)
+        self.vectorfit_estimate_spots.setToolTip(spots_tip)
+        vectorfit_grid.addWidget(
+            self.vectorfit_estimate_spots_label, len(spinboxes) + 3, 0
+        )
+        vectorfit_grid.addWidget(
+            self.vectorfit_estimate_spots, len(spinboxes) + 3, 1
+        )
         self.update_vectorfit_3d()
+        self.update_vectorfit_estimate()
 
         # Channel registration for the multichannel (joint) 2D spherical
         # Gaussian fit. Shown only for that model; unlike the spline path this
@@ -6909,6 +6958,12 @@ class ParametersDialog(lib.Dialog):
         parameters["Discard outliers"] = (
             self.vectorfit_outliers_checkbox.isChecked()
         )
+        parameters["Estimate aberrations"] = (
+            self.vectorfit_estimate_checkbox.isChecked()
+        )
+        parameters["Aberration estimation spots"] = (
+            self.vectorfit_estimate_spots.value()
+        )
         return parameters
 
     def set_vectorfit_parameters(self, parameters: dict | None) -> None:
@@ -6930,6 +6985,33 @@ class ParametersDialog(lib.Dialog):
         self.vectorfit_outliers_checkbox.setChecked(
             parameters["Discard outliers"]
         )
+        self.vectorfit_estimate_checkbox.setChecked(
+            parameters["Estimate aberrations"]
+        )
+        self.vectorfit_estimate_spots.setValue(
+            parameters["Aberration estimation spots"]
+        )
+        self.update_vectorfit_estimate()
+
+    #: Tooltips of the primary aberrations, without and with the
+    #: estimation of the field-dependent aberrations.
+    _VECTORFIT_ABERRATION_TIPS = (
+        "Fixed aberration of the PSF model; it is not fitted.",
+        "Initial value of the estimated aberration (the constant part\n"
+        "of its variation over the field of view).",
+    )
+
+    def update_vectorfit_estimate(self, _checked: bool = False) -> None:
+        """Enable the number of spots of the aberration estimation only
+        while it is selected, and say whether the primary aberrations are
+        fixed or initial values."""
+        estimate = self.vectorfit_estimate_checkbox.isChecked()
+        self.vectorfit_estimate_spots.setEnabled(estimate)
+        self.vectorfit_estimate_spots_label.setEnabled(estimate)
+        tip = self._VECTORFIT_ABERRATION_TIPS[estimate]
+        for key in vectorfit._PRIMARY_ABERRATIONS:
+            self.vectorfit_spinboxes[key].setToolTip(tip)
+            self.vectorfit_labels[key].setToolTip(tip)
 
     def update_vectorfit_3d(self, _value: float = 0.0) -> None:
         """Enable the 3D VectorFit model only while an aberration that

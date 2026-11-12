@@ -1305,6 +1305,8 @@ class TestGui:
             "Vertical coma": 8.25,
             "Spherical aberration": -40.0,
             "Discard outliers": False,
+            "Estimate aberrations": True,
+            "Aberration estimation spots": 1500,
         }
         dialog = self._dialog()
         try:

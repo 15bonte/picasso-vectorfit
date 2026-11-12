@@ -2529,6 +2529,25 @@ def _add_vectorfit_args(parser: argparse.ArgumentParser) -> None:
             "them"
         ),
     )
+    parser.add_argument(
+        "--vf-estimate-aberrations",
+        action="store_true",
+        help=(
+            "VectorFit: estimate the field-dependent aberrations from the "
+            "data before the fit (the --vf-* aberrations are then initial "
+            "values; the largest astigmatism or spherical aberration keeps "
+            "its sign, which sets the sign of z)"
+        ),
+    )
+    parser.add_argument(
+        "--vf-estimation-spots",
+        type=int,
+        default=None,
+        help=(
+            "VectorFit: number of spots the aberration estimation uses, "
+            "selected uniformly over the field of view (default 1000)"
+        ),
+    )
 
 
 def _vectorfit_parameters_from_args(args: argparse.Namespace) -> dict:
@@ -2541,6 +2560,10 @@ def _vectorfit_parameters_from_args(args: argparse.Namespace) -> dict:
     }
     if getattr(args, "vf_keep_outliers", False):
         parameters["Discard outliers"] = False
+    if getattr(args, "vf_estimate_aberrations", False):
+        parameters["Estimate aberrations"] = True
+    if getattr(args, "vf_estimation_spots", None) is not None:
+        parameters["Aberration estimation spots"] = args.vf_estimation_spots
     return parameters
 
 

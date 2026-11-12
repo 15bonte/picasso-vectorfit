@@ -5,7 +5,7 @@ Vectorial PSF (VectorFit)
 
 Picasso can fit a **vectorial PSF model** to every spot with the VectorFit library. The model is computed from the optics of the microscope, so no bead calibration is needed, and its 3D variant recovers ``z`` directly.
 
-VectorFit is described in `Droste et al., Optica, 2025 <https://doi.org/10.1364/OPTICA.560721>`_. That work also estimates field-dependent aberrations from the single-molecule data itself; Picasso does not do this yet and only uses the aberrations you set (see below).
+VectorFit is described in `Droste et al., Optica, 2025 <https://doi.org/10.1364/OPTICA.560721>`_. That work also estimates field-dependent aberrations from the single-molecule data itself, which Picasso can do as well (see :ref:`localize-vectorfit-estimate`); otherwise it uses the aberrations you set (see below).
 
 Theory
 ------
@@ -38,7 +38,7 @@ Because the refractive-index mismatch is part of the model, the fitted ``z`` nee
    * - Spherical aberration
      - Z\ :sub:`4`\ :sup:`0`
 
-They are **fixed**: the same for every spot across the field of view, and not fitted.
+By default they are **fixed**: the same for every spot across the field of view, and not fitted. Alternatively, they can be estimated from the data, varying over the field of view (see :ref:`localize-vectorfit-estimate`).
 
 **Fit.** Each spot is fitted by maximum likelihood under Poisson noise, with Levenberg-Marquardt iterations started from a phasor-based estimate of the position. The *2D* model fits ``x``, ``y``, photons and background; the *3D* model fits ``z`` as well, within ±800 nm of the focal plane. The localization precisions (``lpx``, ``lpy``, ``lpz``, ``photons_unc``, ``bg_unc``) are the Cramér-Rao lower bounds at the fitted parameters.
 
@@ -83,6 +83,8 @@ Besides the driver, the GPU build needs a GPU of compute capability 8.0 (Ampere,
 5. Set the aberrations you know. For 3D imaging with a cylindrical lens, enter its astigmatism. The ``3D`` fit model can only be selected once the vertical or oblique astigmatism or the spherical aberration is set: an aberration-free PSF is symmetric about focus, so ``z`` above and below focus cannot be told apart. Coma alone does not help, as it only mirrors the spot sideways. The command line and the Python API stop with an error if ``3D`` is asked for without one of these aberrations.
 6. Run ``Analyze`` > ``Localize (Identify & Fit)`` (or ``Fit`` for already-identified spots).
 
+**Estimating the aberrations.** Tick **Estimate field-dependent aberrations from the data** to estimate them before the fit, see :ref:`localize-vectorfit-estimate`.
+
 **Outliers.** VectorFit flags the spots whose fit did not converge, whose likelihood is far below the others' or whose position lies far from the box center. They are discarded unless **Discard outliers** is unticked. Their number is shown in the status bar and saved in the metadata as ``VectorFit outliers discarded``.
 
 In addition to the usual columns, VectorFit fits report ``lpx``, ``lpy`` (and ``z``, ``lpz`` for 3D), ``photons_unc``, ``bg_unc``, ``log_likelihood``, ``reduced_chi_square`` and ``iterations``. The settings are recorded in the ``_locs.yaml`` metadata.
@@ -97,7 +99,7 @@ In addition to the usual columns, VectorFit fits report ``lpx``, ``lpy`` (and ``
              --vf-model 3D --vf-wavelength 670 --vf-na 1.49 \
              --vf-vertical-astigmatism 80
 
-      ``--fit-method vectorfit-gpu`` fits on the GPU. The ``--vf-*`` options set the optics (``--vf-wavelength``, ``--vf-na``, ``--vf-n-medium``, ``--vf-n-coverslip``, ``--vf-n-immersion``) and the aberrations (``--vf-vertical-astigmatism``, ``--vf-oblique-astigmatism``, ``--vf-horizontal-coma``, ``--vf-vertical-coma``, ``--vf-spherical-aberration``). ``--vf-keep-outliers`` keeps the outliers.
+      ``--fit-method vectorfit-gpu`` fits on the GPU. The ``--vf-*`` options set the optics (``--vf-wavelength``, ``--vf-na``, ``--vf-n-medium``, ``--vf-n-coverslip``, ``--vf-n-immersion``) and the aberrations (``--vf-vertical-astigmatism``, ``--vf-oblique-astigmatism``, ``--vf-horizontal-coma``, ``--vf-vertical-coma``, ``--vf-spherical-aberration``). ``--vf-keep-outliers`` keeps the outliers. ``--vf-estimate-aberrations`` estimates the field-dependent aberrations from the data, from ``--vf-estimation-spots`` spots (default 1000).
 
    .. tab-item:: Python
 
@@ -122,3 +124,27 @@ In addition to the usual columns, VectorFit fits report ``lpx``, ``lpy`` (and ``
          )
 
       Settings left out take the defaults of ``picasso.vectorfit.DEFAULT_PARAMETERS``. ``fitting_method="vectorfit-gpu"`` fits on the GPU; ``picasso.vectorfit.gpu_unavailable_reason()`` returns why it cannot, or None if it can.
+
+.. _localize-vectorfit-estimate:
+
+Estimating field-dependent aberrations
+--------------------------------------
+
+The aberrations of a microscope are rarely the same across a large field of view. VectorFit can estimate how they vary from the single-molecule data itself, without a bead calibration (`Droste et al., Optica, 2025 <https://doi.org/10.1364/OPTICA.560721>`_), and Picasso can run this estimation right before the fit: tick **Estimate field-dependent aberrations from the data** in the **Vectorial PSF (VectorFit)** box (``--vf-estimate-aberrations``, or ``"Estimate aberrations": True`` in ``vectorfit_parameters``).
+
+**Model.** Following nodal aberration theory, every primary aberration (astigmatism, coma, spherical aberration) varies over the normalized field coordinates as a low-order polynomial: a constant part (the average over the field of view, the value the fixed aberrations above stand for), a linear part for astigmatism and coma and a quadratic part for astigmatism. These 13 coefficients (in nm, Legendre polynomials in the field coordinates) describe the aberrations of every spot.
+
+**Estimation.** A selection of the spots, spread uniformly over the field of view (**Spots for the estimation**, 1000 by default), is fitted repeatedly, alternating between
+
+- fitting every selected spot (``x``, ``y``, ``z``, photons, background) with the aberrations at its position, and
+- fitting the aberration coefficients to a random subset of 200 of them, with the spots' own parameters fixed,
+
+until the total likelihood no longer improves. Then every spot is fitted with the aberrations at its position. ``z`` is fitted during the estimation also for 2D data, so that a spot's defocus is not mistaken for an aberration; for the same reason, defocus and field curvature are not estimated.
+
+**Initial values and the sign of z.** The aberrations you set serve as initial values. Flipping the sign of the astigmatism and the spherical aberration together with the sign of ``z`` gives the same PSFs, so the data cannot tell the two apart: the largest of the astigmatisms and the spherical aberration you set keeps its sign during the estimation (the vertical astigmatism stays positive if none is set). For 3D data, set the astigmatism of your cylindrical lens with its sign. If no astigmatism or spherical aberration is set, the estimation starts from 150 mλ (3D, as VectorFit does) or 50 mλ (2D) of vertical astigmatism: from zero, the PSF would be symmetric about focus, the sign of each spot's ``z`` arbitrary, and the estimation would stall.
+
+**Result.** The estimated coefficients are saved in the metadata as ``VectorFit estimated aberrations``, with how many spots and iterations were used and whether the estimation converged. The estimation needs at least 50 spots; with 1000 spots it adds a few minutes on the CPU. It works for 2D data as well as for 3D (astigmatic) data; the spots should cover the field of view.
+
+.. note::
+
+   The estimation needs ``vectorfit-py`` 0.4.0 or newer, whose fitter can evaluate the model at given parameters.

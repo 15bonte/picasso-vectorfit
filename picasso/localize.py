@@ -4325,6 +4325,13 @@ def fit(
           nm, default 0;
         - "Discard outliers": drop the spots VectorFit flags as outliers,
           default True.
+        - "Estimate aberrations": estimate the field-dependent
+          aberrations from the spots before the fit (see
+          ``picasso.vectorfit_aberrations``), the aberrations above then
+          being initial values; default False. The estimate is recorded
+          in the metadata as "VectorFit estimated aberrations";
+        - "Aberration estimation spots": spots the estimation uses,
+          default 1000.
 
         The pixel size is read from ``camera_info``. The number of
         outliers the fit discarded is recorded in the metadata as
@@ -4418,6 +4425,10 @@ def fit(
         vectorfit.check_box(box)
         if fitting_method == "vectorfit-gpu":
             vectorfit.check_gpu()
+        if vectorfit_parameters["Estimate aberrations"]:
+            from . import vectorfit_aberrations
+
+            vectorfit_aberrations.check_supported()
     with lib.tracked_progress(progress, "Fitting spots", "spot") as progress:
         spots, variance = get_spots(
             movie,
@@ -4799,6 +4810,7 @@ def _dispatch_fit(
             use_gpu=fitting_method.endswith("-gpu"),
             progress=progress,
             abort_callback=abort_callback,
+            fit_stats=fit_stats,
         )
     elif fitting_method == "phasor":
         locs = _fit2d_phasor(
@@ -10356,6 +10368,30 @@ def _locs_from_fits_phasor(
     return locs.reset_index(drop=True), n_outside
 
 
+def _vectorfit_estimate_info(estimate: dict) -> dict:
+    """Metadata of a VectorFit aberration estimate (see
+    ``vectorfit_aberrations.estimate_aberrations``): the estimated
+    Legendre coefficients in nm, keyed by ``vectorfit.LEGENDRE_LABELS``,
+    and how the estimation went."""
+    return {
+        vectorfit.ESTIMATED_ABERRATIONS_KEY: {
+            label: round(float(value), 4)
+            for label, value in zip(
+                vectorfit.LEGENDRE_LABELS, estimate["gammas"]
+            )
+        },
+        "VectorFit aberration estimation spots used": int(
+            len(estimate["indices"])
+        ),
+        "VectorFit aberration estimation iterations": int(
+            estimate["iterations"]
+        ),
+        "VectorFit aberration estimation converged": bool(
+            estimate["converged"]
+        ),
+    }
+
+
 def _fit2d_vectorfit(
     spots: lib.FloatArray3D,
     identifications: pd.DataFrame,
@@ -10369,12 +10405,39 @@ def _fit2d_vectorfit(
     use_gpu: bool = False,
     progress: lib.Progress | None = None,
     abort_callback: Callable[[], bool] | None = None,
+    fit_stats: dict | None = None,
 ) -> pd.DataFrame | None:
     """Fit a vectorial PSF model with VectorFit, on the GPU if
     ``use_gpu``, see ``fit`` for more details. On the CPU VectorFit runs
     its own threads, so ``parallel`` only chooses between all of them and
     one. ``progress`` (a normalized tracker, or None) gets the "Fitting
-    spots" phase. Returns None if ``abort_callback`` asked to stop."""
+    spots" phase, preceded by "Estimating aberrations" if
+    ``parameters["Estimate aberrations"]``; the estimate is then recorded
+    in ``fit_stats`` (see ``_vectorfit_estimate_info``). Returns None if
+    ``abort_callback`` asked to stop."""
+    gammas = None
+    if parameters["Estimate aberrations"]:
+        from . import vectorfit_aberrations
+
+        estimate = vectorfit_aberrations.estimate_aberrations(
+            spots,
+            vectorfit.box_centers(identifications),
+            parameters=parameters,
+            pixelsize=pixelsize,
+            image_shape=image_shape,
+            n_spots=parameters["Aberration estimation spots"],
+            tolerance=tolerance,
+            max_iterations=max_iterations,
+            n_threads=lib.n_workers() if parallel else 1,
+            use_gpu=use_gpu,
+            progress=progress,
+            abort_callback=abort_callback,
+        )
+        if estimate is None:
+            return None
+        gammas = estimate["gammas"]
+        if fit_stats is not None:
+            fit_stats.update(_vectorfit_estimate_info(estimate))
     result = vectorfit.fit_spots(
         spots,
         identifications,
@@ -10387,6 +10450,7 @@ def _fit2d_vectorfit(
         use_gpu=use_gpu,
         progress=progress,
         abort_callback=abort_callback,
+        gammas=gammas,
     )
     if result is None:
         return None

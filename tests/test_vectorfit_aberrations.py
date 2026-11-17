@@ -63,6 +63,14 @@ class TestParameters:
         assert parameters["Aberration estimation spots"] == 500
         assert isinstance(parameters["Aberration estimation spots"], int)
 
+    def test_3d_estimation_needs_no_aberration(self):
+        parameters = vectorfit.parameters_with_defaults(
+            {"Fit model": "3D", "Estimate aberrations": True}
+        )
+        assert parameters["Fit model"] == "3D"
+        with pytest.raises(ValueError, match="estimate the aberrations"):
+            vectorfit.parameters_with_defaults({"Fit model": "3D"})
+
     @pytest.mark.parametrize("value", [1, "yes", None])
     def test_estimate_must_be_a_boolean(self, value):
         with pytest.raises(ValueError, match="Estimate aberrations"):
@@ -115,51 +123,12 @@ class TestNatConstants:
         )
 
 
-class TestReferenceGamma:
-    def test_vertical_astigmatism_positive_by_default(self):
-        """As VectorFit (``params.idx_pos = 5``)."""
-        assert va.reference_gamma(np.zeros(va.N_GAMMAS)) == (4, 1.0)
-
-    def test_coma_does_not_count(self):
-        gammas = np.zeros(va.N_GAMMAS)
-        gammas[9] = -50.0
-        assert va.reference_gamma(gammas) == (4, 1.0)
-
-    @pytest.mark.parametrize(
-        "index, value", [(4, -80.0), (5, 60.0), (5, -60.0), (12, -30.0)]
-    )
-    def test_largest_even_aberration_keeps_its_sign(self, index, value):
-        gammas = np.zeros(va.N_GAMMAS)
-        gammas[index] = value
-        gammas[4 if index != 4 else 5] = 0.5 * value  # smaller
-        assert va.reference_gamma(gammas) == (index, np.sign(value))
+def test_vertical_astigmatism_stays_positive():
+    """As VectorFit (``params.idx_pos = 5``)."""
+    assert va.REFERENCE == (4, 1.0)
 
 
 class TestInitialGammas:
-    def test_fixed_values_are_kept_and_the_rest_is_small(self):
-        fixed = np.zeros(va.N_GAMMAS)
-        fixed[[4, 9]] = [-80.0, 12.0]
-        gammas = va.initial_gammas(
-            fixed, 680.0, True, np.random.default_rng(0)
-        )
-        assert gammas[4] == -80.0
-        assert gammas[9] == 12.0
-        np.testing.assert_array_equal(gammas[:4], 0)
-        others = np.setdiff1d(va.FITTED_GAMMAS, [4, 9])
-        assert np.all(np.abs(gammas[others]) < 1.0)
-        assert np.all(gammas[others] != 0)
-
-    def test_random_part_has_the_initial_level(self):
-        fixed = np.zeros(va.N_GAMMAS)
-        fixed[5] = 20.0
-        gammas = va.initial_gammas(
-            fixed, 680.0, False, np.random.default_rng(1)
-        )
-        assert gammas[5] == 20.0
-        random = gammas.copy()
-        random[5] = 0
-        assert va.system_aberration(random, 680.0) < va.INITIAL_LEVEL
-
     @pytest.mark.parametrize(
         "is_3d, level",
         [
@@ -167,21 +136,22 @@ class TestInitialGammas:
             (False, va.INITIAL_ASTIGMATISM_2D),
         ],
     )
-    def test_without_astigmatism_starts_from_some(self, is_3d, level):
-        """Not from zero, where the estimation stalls."""
-        fixed = np.zeros(va.N_GAMMAS)
-        fixed[9] = 20.0  # coma alone
-        gammas = va.initial_gammas(
-            fixed, 680.0, is_3d, np.random.default_rng(0)
-        )
+    def test_vertical_astigmatism_and_small_random_rest(self, is_3d, level):
+        """``initialvalues_phasor_nat.m``: 150 mlambda (3D) or 50 mlambda
+        (2D) of vertical astigmatism, the other fitted gammas random at
+        about 1 mlambda, defocus 0."""
+        gammas = va.initial_gammas(680.0, is_3d, np.random.default_rng(0))
         assert gammas[4] == pytest.approx(level * 680.0 * 1e-3)
-        assert gammas[9] == 20.0
+        np.testing.assert_array_equal(gammas[:4], 0)
+        rest = gammas.copy()
+        rest[4] = 0
+        assert 0 < va.system_aberration(rest, 680.0) <= va.INITIAL_LEVEL
+        assert np.all(rest[5:] != 0)
 
     def test_reproducible_with_a_seed(self):
-        args = (np.zeros(va.N_GAMMAS), 680.0, False)
         np.testing.assert_array_equal(
-            va.initial_gammas(*args, np.random.default_rng(3)),
-            va.initial_gammas(*args, np.random.default_rng(3)),
+            va.initial_gammas(680.0, False, np.random.default_rng(3)),
+            va.initial_gammas(680.0, False, np.random.default_rng(3)),
         )
 
 
@@ -390,6 +360,55 @@ def test_check_supported_needs_evaluate(monkeypatch):
         va.check_supported()
 
 
+@pytest.mark.parametrize("model", ["2D", "3D"])
+def test_estimation_ignores_the_manual_aberrations(monkeypatch, model):
+    """It starts from VectorFit's own initial values, whatever the
+    (hidden) manual aberrations, as VectorFit does."""
+    started = []
+    original = va.initial_gammas
+
+    class Started(Exception):
+        pass
+
+    def recording_initial(wavelength, is_3d, rng):
+        started.append((original(wavelength, is_3d, rng), is_3d))
+        raise Started
+
+    monkeypatch.setattr(va, "check_supported", lambda: None)
+    monkeypatch.setattr(
+        vectorfit, "_import_vectorfit", lambda: types.SimpleNamespace()
+    )
+    monkeypatch.setattr(vectorfit, "fit_params", lambda *a, **k: None)
+    monkeypatch.setattr(
+        vectorfit,
+        "_fixed_aberrations",
+        lambda *args: (np.full(13, 99.0), np.zeros((6, 3))),
+    )
+    monkeypatch.setattr(va, "initial_gammas", recording_initial)
+    for manual in ({}, {"Vertical astigmatism": -80.0, "Horizontal coma": 30}):
+        with pytest.raises(Started):
+            va.estimate_aberrations(
+                np.zeros((60, 9, 9)),
+                np.ones((2, 60)),
+                parameters={"Fit model": model, **manual},
+                pixelsize=100.0,
+                image_shape=(64, 64),
+            )
+    (first, is_3d), (second, _) = started
+    assert is_3d == (model == "3D")
+    np.testing.assert_array_equal(first, second)
+
+
+def test_select_spots_bins_at_most_max_candidates(monkeypatch):
+    """Like ``select_spots.m``: only a random subset of the spots is
+    sorted into the grid; the rest of the selection comes from all."""
+    monkeypatch.setattr(va, "MAX_CANDIDATES", 200)
+    rng = np.random.default_rng(0)
+    roi = rng.uniform(1, 1000, (2, 5000))
+    indices = va.select_spots(roi, (1000, 1000), 1000, rng)
+    assert len(np.unique(indices)) == 1000
+
+
 def test_too_few_spots_are_rejected(monkeypatch):
     monkeypatch.setattr(va, "check_supported", lambda: None)
     monkeypatch.setattr(
@@ -589,35 +608,84 @@ class TestGui:
 
         return localize_gui.ParametersDialog(_StubWindow())
 
-    def test_round_trip_and_enabled_state(self, qt_offscreen):
+    def test_aberrations_drop_down(self, qt_offscreen):
+        """First choice: the aberrations; second choice: the number of
+        spots of the estimation."""
+        from picasso.gui import localize as localize_gui
+
         dialog = self._dialog()
         try:
-            assert not dialog.vectorfit_estimate_checkbox.isChecked()
-            assert not dialog.vectorfit_estimate_spots.isEnabled()
-            fixed_tip = dialog.vectorfit_spinboxes[
-                "Vertical astigmatism"
-            ].toolTip()
+            combo = dialog.vectorfit_aberrations
+            assert [combo.itemText(i) for i in range(combo.count())] == list(
+                localize_gui.ParametersDialog.VECTORFIT_ABERRATION_MODES
+            )
+            assert combo.currentText() == "Define aberrations manually"
+
+            def shown(widget):
+                return not widget.isHidden()
+
+            for key in vectorfit._PRIMARY_ABERRATIONS:
+                assert shown(dialog.vectorfit_spinboxes[key])
+                assert shown(dialog.vectorfit_labels[key])
+            assert not shown(dialog.vectorfit_estimate_spots)
+            assert not shown(dialog.vectorfit_estimate_spots_label)
+
+            combo.setCurrentIndex(1)
+            for key in vectorfit._PRIMARY_ABERRATIONS:
+                assert not shown(dialog.vectorfit_spinboxes[key])
+                assert not shown(dialog.vectorfit_labels[key])
+            assert shown(dialog.vectorfit_estimate_spots)
+            assert shown(dialog.vectorfit_estimate_spots_label)
+            # the optics stay
+            assert shown(dialog.vectorfit_spinboxes["NA"])
+            assert dialog.vectorfit_parameters()["Estimate aberrations"]
+
+            combo.setCurrentIndex(0)
+            assert shown(dialog.vectorfit_spinboxes["Vertical astigmatism"])
+            assert not shown(dialog.vectorfit_estimate_spots)
+            assert not dialog.vectorfit_parameters()["Estimate aberrations"]
+        finally:
+            dialog.deleteLater()
+
+    def test_round_trip(self, qt_offscreen):
+        dialog = self._dialog()
+        try:
             dialog.set_vectorfit_parameters(
                 {
                     "Estimate aberrations": True,
                     "Aberration estimation spots": 2500,
+                    "Vertical astigmatism": 30.0,
                 }
             )
-            assert dialog.vectorfit_estimate_spots.isEnabled()
+            assert dialog.vectorfit_aberrations.currentIndex() == 1
             parameters = dialog.vectorfit_parameters()
             assert parameters["Estimate aberrations"] is True
             assert parameters["Aberration estimation spots"] == 2500
+            # the hidden manual aberrations are kept for the first choice
+            assert parameters["Vertical astigmatism"] == 30.0
             assert set(parameters) == set(vectorfit.DEFAULT_PARAMETERS)
-            assert (
-                dialog.vectorfit_spinboxes["Vertical astigmatism"].toolTip()
-                != fixed_tip
+        finally:
+            dialog.deleteLater()
+
+    def test_3d_needs_no_aberration_when_estimating(self, qt_offscreen):
+        dialog = self._dialog()
+        try:
+            item = dialog.vectorfit_model.model().item(
+                dialog.vectorfit_model.findText("3D")
             )
-            assert (
-                "Initial"
-                in dialog.vectorfit_labels["Spherical aberration"].toolTip()
+            assert not item.isEnabled()  # no manual aberration set
+            dialog.vectorfit_aberrations.setCurrentIndex(1)
+            assert item.isEnabled()
+            dialog.vectorfit_model.setCurrentText("3D")
+            assert dialog.vectorfit_parameters()["Fit model"] == "3D"
+            # back to manual aberrations without any: 2D again
+            dialog.vectorfit_aberrations.setCurrentIndex(0)
+            assert dialog.vectorfit_model.currentText() == "2D"
+            # a stored 3D estimation comes back as such
+            dialog.set_vectorfit_parameters(
+                {"Fit model": "3D", "Estimate aberrations": True}
             )
-            dialog.vectorfit_estimate_checkbox.setChecked(False)
-            assert not dialog.vectorfit_estimate_spots.isEnabled()
+            assert dialog.vectorfit_model.currentText() == "3D"
         finally:
             dialog.deleteLater()
 
@@ -742,7 +810,7 @@ class TestWithVectorFit:
         rng = np.random.default_rng(0)
         true = np.zeros(13)
         true[4:] = [70.0, 10.0, 15.0, -10.0, 8.0, 20.0, -15.0, 10.0, -15.0]
-        parameters = {"Fit model": "3D", "Vertical astigmatism": 50.0}
+        parameters = {"Fit model": "3D", "Estimate aberrations": True}
         spots, roi, *_ = _simulate(
             vectorfit_py, parameters, true, 1500, 11, 100.0, (512, 512), rng
         )
@@ -767,15 +835,20 @@ class TestWithVectorFit:
         assert estimate["log_likelihood"][-1] > estimate["log_likelihood"][0]
 
     @pytest.mark.slow
-    def test_negative_astigmatism_keeps_its_sign(self):
-        """The cylindrical lens can be the other way round: an initial
-        negative astigmatism keeps the estimate on that branch."""
+    def test_negative_astigmatism_comes_out_mirrored(self):
+        """The vertical astigmatism is kept positive: a negative one is
+        estimated on the mirrored branch (even aberrations and z flipped
+        together), whatever the manual aberrations."""
         import vectorfit_py
 
         rng = np.random.default_rng(1)
         true = np.zeros(13)
         true[[4, 9, 12]] = [-70.0, 15.0, 10.0]
-        parameters = {"Fit model": "3D", "Vertical astigmatism": -40.0}
+        parameters = {
+            "Fit model": "3D",
+            "Estimate aberrations": True,
+            "Vertical astigmatism": -40.0,  # ignored
+        }
         spots, roi, *_ = _simulate(
             vectorfit_py, parameters, true, 600, 11, 100.0, (256, 256), rng
         )
@@ -788,9 +861,10 @@ class TestWithVectorFit:
             n_spots=400,
             n_threads=8,
         )
-        assert estimate["gammas"][4] < 0
         np.testing.assert_allclose(
-            estimate["gammas"][[4, 9, 12]], true[[4, 9, 12]], atol=3.0
+            estimate["gammas"][[4, 9, 12]],
+            (va.SYMMETRY * true)[[4, 9, 12]],
+            atol=3.0,
         )
 
     def test_abort(self):

@@ -2534,9 +2534,8 @@ def _add_vectorfit_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "VectorFit: estimate the field-dependent aberrations from the "
-            "data before the fit (the --vf-* aberrations are then initial "
-            "values; the largest astigmatism or spherical aberration keeps "
-            "its sign, which sets the sign of z)"
+            "data before the fit, instead of using the --vf-* aberrations "
+            "(then ignored; the 3D model needs none of them)"
         ),
     )
     parser.add_argument(

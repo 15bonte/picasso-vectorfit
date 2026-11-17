@@ -4327,9 +4327,10 @@ def fit(
           default True.
         - "Estimate aberrations": estimate the field-dependent
           aberrations from the spots before the fit (see
-          ``picasso.vectorfit_aberrations``), the aberrations above then
-          being initial values; default False. The estimate is recorded
-          in the metadata as "VectorFit estimated aberrations";
+          ``picasso.vectorfit_aberrations``) instead of using the
+          aberrations above, which are then ignored; default False. The
+          estimate is recorded in the metadata as "VectorFit estimated
+          aberrations";
         - "Aberration estimation spots": spots the estimation uses,
           default 1000.
 

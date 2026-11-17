@@ -4,7 +4,11 @@ picasso.vectorfit_aberrations
 
 Estimates the field-dependent aberrations of a VectorFit PSF model from
 the data itself, as VectorFit's MATLAB pipeline does between segmentation
-and localization (``SMLM_pipeline/estimate_aberrations.m``).
+and localization (``SMLM_pipeline/estimate_aberrations.m``, with
+``params.cpp = true``: the local updates by VectorFit's C++ fitter, as in
+``NAT_fitting/local_update_cpp.m``). It is a port of that pipeline, as
+fixed on the ``estimate_aberrations_fix`` branch of VectorFit, with its
+defaults (``set_parameters_microtubules_3D.m``), one rep and one init.
 
 The aberrations are described by nodal aberration theory (NAT): the
 Zernike coefficient of every primary aberration varies over the field of
@@ -30,11 +34,15 @@ defocus/field-curvature gammas are not fitted for that reason.
 
 The PSF is unchanged when the sign of the aberrations of even azimuthal
 order (astigmatism, spherical aberration) and of z flip together. That
-ambiguity is broken by keeping one of them (the reference gamma, see
-:func:`reference_gamma`) at a fixed sign, flipping the others and z of
-every spot whenever an update crosses zero. Unlike the MATLAB code
-(``global_update.m``, fixed alongside), the flip belongs to the trial
-update and is applied to the spots only once that update is accepted.
+ambiguity is broken, as in VectorFit, by keeping the constant vertical
+astigmatism positive (``REFERENCE``, ``params.idx_pos``), flipping the
+others and z of every spot whenever an update crosses zero. The flip
+belongs to the trial update and is applied to the spots only once that
+update is accepted (``global_update.m``).
+
+The manual aberrations of the VectorFit settings are not used, as in
+VectorFit, whose estimation starts from its own initial values (see
+:func:`initial_gammas`).
 
 References
 ----------
@@ -70,13 +78,15 @@ from . import lib, vectorfit
 #: - LAMBDA_GLOBAL, LAMBDA_FACTOR: initial Levenberg-Marquardt damping of
 #:   the global update and its factor;
 #: - INITIAL_LEVEL: RMS level of the random initial gammas (mlambda);
-#: - INITIAL_ASTIGMATISM_3D, INITIAL_ASTIGMATISM_2D: initial vertical
-#:   astigmatism (mlambda) of a 3D / 2D estimation when no astigmatism or
-#:   spherical aberration is set. VectorFit starts 2D data from (almost)
-#:   zero, where the estimation stalls: the PSF is then symmetric about
-#:   focus, so each spot's z takes an arbitrary sign and the spots' pulls
-#:   on the astigmatism and spherical aberration cancel. Starting from
-#:   either sign is equivalent (see ``SYMMETRY``).
+#: - INITIAL_ASTIGMATISM_3D: initial vertical astigmatism (mlambda) of a
+#:   3D estimation (``params.gammas_init``);
+#: - INITIAL_ASTIGMATISM_2D: that of a 2D estimation, which has none in
+#:   ``params.gammas_init`` (``initialvalues_phasor_nat.m``): from (almost)
+#:   zero the estimation stalls, as the PSF is then symmetric about focus,
+#:   so each spot's z takes an arbitrary sign and the spots' pulls on the
+#:   astigmatism and spherical aberration cancel;
+#: - MAX_CANDIDATES: most spots :func:`select_spots` sorts into the grid
+#:   (``Ncfg_max`` of ``select_spots.m``).
 N_SPOTS = 1000
 N_SPOTS_GLOBAL = 200
 MIN_TOTAL_ITERATIONS = 5
@@ -90,6 +100,7 @@ LAMBDA_FACTOR = 10.0
 INITIAL_LEVEL = 1.0
 INITIAL_ASTIGMATISM_3D = 150.0
 INITIAL_ASTIGMATISM_2D = 50.0
+MAX_CANDIDATES = 100_000
 
 #: Fewest spots an estimation accepts: 9 gammas are fitted.
 MIN_SPOTS = 50
@@ -116,10 +127,10 @@ MULTIPLEX = np.array(
     [1, 1, 1, 2, 1, 1, 2, 2, 1.4, 1, 1, 2, 1], dtype=np.float64
 )
 
-#: Constant gammas of even azimuthal order, the candidates of
-#: :func:`reference_gamma`: vertical and oblique astigmatism, spherical
-#: aberration.
-_REFERENCE_CANDIDATES = (4, 5, 12)
+#: The gamma whose sign is kept to break the z-flip symmetry (see
+#: ``SYMMETRY``), and that sign: the constant vertical astigmatism stays
+#: positive (``params.idx_pos``).
+REFERENCE = (4, 1.0)
 
 
 def system_aberration(gammas: np.ndarray, wavelength: float) -> float:
@@ -129,54 +140,19 @@ def system_aberration(gammas: np.ndarray, wavelength: float) -> float:
     return float(np.sqrt(np.sum(MULTIPLEX * gammas**2)) * 1e3 / wavelength)
 
 
-def reference_gamma(initial: np.ndarray) -> tuple[int, float]:
-    """The gamma whose sign is kept fixed to break the z-flip symmetry
-    (see ``SYMMETRY``), and that sign.
-
-    VectorFit keeps the constant vertical astigmatism positive
-    (``params.idx_pos``). Here the constant aberration of even order with
-    the largest initial magnitude keeps its initial sign, so that the
-    estimate stays on the side of the symmetry the user's setup is on
-    (e.g. a negative astigmatism of the cylindrical lens); without one,
-    the vertical astigmatism is kept positive, as in VectorFit.
-
-    Parameters
-    ----------
-    initial : np.ndarray
-        The 13 initial gammas (nm).
-
-    Returns
-    -------
-    index : int
-    sign : float
-        +1.0 or -1.0.
-    """
-    initial = np.asarray(initial, dtype=np.float64)
-    candidates = np.array(_REFERENCE_CANDIDATES)
-    magnitudes = np.abs(initial[candidates])
-    if not np.any(magnitudes > 0):
-        return 4, 1.0
-    index = int(candidates[np.argmax(magnitudes)])
-    return index, 1.0 if initial[index] > 0 else -1.0
-
-
 def initial_gammas(
-    fixed: np.ndarray,
     wavelength: float,
     is_3d: bool,
     rng: np.random.Generator,
 ) -> np.ndarray:
     """Initial gammas of the estimation (``initialvalues_phasor_nat.m``):
-    random fitted gammas at an RMS level of ``INITIAL_LEVEL`` mlambda,
-    replaced by the non-zero ones of ``fixed`` (the aberrations the user
-    set). Without any astigmatism or spherical aberration, the estimation
-    starts from ``INITIAL_ASTIGMATISM_3D`` (as VectorFit does) or
-    ``INITIAL_ASTIGMATISM_2D`` of vertical astigmatism.
+    random fitted gammas scaled to an RMS level of ``INITIAL_LEVEL``
+    mlambda, then the vertical astigmatism set to
+    ``INITIAL_ASTIGMATISM_3D`` (3D, ``params.gammas_init``) or
+    ``INITIAL_ASTIGMATISM_2D`` (2D) mlambda, positive (``REFERENCE``).
 
     Parameters
     ----------
-    fixed : np.ndarray
-        13 gammas (nm); the non-zero ones are used as they are.
     wavelength : float
         Emission wavelength (nm).
     is_3d : bool
@@ -186,20 +162,14 @@ def initial_gammas(
     Returns
     -------
     gammas : np.ndarray
-        13 gammas (nm); the reference gamma (:func:`reference_gamma`) has
-        its sign.
+        13 gammas (nm).
     """
-    fixed = np.asarray(fixed, dtype=np.float64).copy()
-    if not np.any(fixed[list(_REFERENCE_CANDIDATES)]):
-        level = INITIAL_ASTIGMATISM_3D if is_3d else INITIAL_ASTIGMATISM_2D
-        fixed[4] = level * wavelength * 1e-3
     gammas = np.zeros(N_GAMMAS)
     gammas[FITTED_GAMMAS] = rng.random(len(FITTED_GAMMAS)) - 0.5
     gammas *= INITIAL_LEVEL / system_aberration(gammas, wavelength)
-    given = fixed != 0
-    gammas[given] = fixed[given]
-    index, sign = reference_gamma(fixed)
-    gammas[index] = sign * abs(gammas[index])
+    level = INITIAL_ASTIGMATISM_3D if is_3d else INITIAL_ASTIGMATISM_2D
+    index, sign = REFERENCE
+    gammas[index] = sign * level * wavelength * 1e-3
     return gammas
 
 
@@ -213,8 +183,9 @@ def select_spots(
     """Select ``n_spots`` spots spread uniformly over the field of view
     (``select_spots.m``): the field is divided into ``grid_size`` x
     ``grid_size`` cells, an equal number of spots is drawn at random from
-    each cell (all of a cell's spots if it has fewer), and the remaining
-    ones at random from the spots not yet drawn.
+    each cell (all of a cell's spots if it has fewer) among a random
+    subset of at most ``MAX_CANDIDATES`` spots, and the remaining ones at
+    random from all the spots not yet drawn.
 
     Parameters
     ----------
@@ -246,13 +217,14 @@ def select_spots(
     cell_index = cells[0] * grid_size + cells[1]
     selected = []
     if per_cell > 0:
-        order = rng.permutation(n_total)
-        # first per_cell spots of each cell, in random order
+        # the candidates, in random order
+        order = rng.permutation(n_total)[:MAX_CANDIDATES]
+        # first per_cell candidates of each cell
         sorted_cells = cell_index[order]
         by_cell = np.argsort(sorted_cells, kind="stable")
         sorted_cells = sorted_cells[by_cell]
         starts = np.searchsorted(sorted_cells, sorted_cells, side="left")
-        rank = np.arange(n_total) - starts
+        rank = np.arange(len(order)) - starts
         selected = order[by_cell[rank < per_cell]]
     remaining = np.setdiff1d(np.arange(n_total), selected)
     extra = rng.choice(remaining, n_spots - len(selected), replace=False)
@@ -381,7 +353,8 @@ def _levenberg_marquardt_step(
     flipped the symmetric ones to keep the reference gamma's sign (which
     must go together with flipping z of every spot)."""
     matrix = hessian + damping * np.diag(np.diag(hessian))
-    if 1.0 / np.linalg.cond(matrix) > np.finfo(np.float64).eps:
+    # rcond: reciprocal condition number in the 1-norm, as MATLAB's
+    if 1.0 / np.linalg.cond(matrix, 1) > np.finfo(np.float64).eps:
         step = -np.linalg.solve(matrix, gradient)
     else:
         step = -np.linalg.pinv(matrix) @ gradient
@@ -548,10 +521,10 @@ def estimate_aberrations(
         order (the first axis of ``image_shape`` first).
     parameters : dict
         VectorFit settings, see ``vectorfit.DEFAULT_PARAMETERS``. The
-        optics define the model; the primary aberrations are the initial
-        values, and the one of the largest magnitude among the
-        astigmatisms and the spherical aberration keeps its sign (see
-        :func:`reference_gamma`).
+        optics define the model; the primary aberrations are ignored: the
+        estimation starts from :func:`initial_gammas`, i.e. from
+        ``INITIAL_ASTIGMATISM_3D`` / ``INITIAL_ASTIGMATISM_2D`` of
+        vertical astigmatism, which stays positive (``REFERENCE``).
     pixelsize : float
         Camera pixel size (nm).
     image_shape : tuple of int
@@ -616,7 +589,10 @@ def estimate_aberrations(
         vectorfit.check_gpu()
     check_supported()
     vectorfit_py = vectorfit._import_vectorfit()
-    parameters = vectorfit.parameters_with_defaults(parameters)
+    # estimating: the 3D model needs no manual aberration
+    parameters = vectorfit.parameters_with_defaults(
+        dict(parameters or {}, **{"Estimate aberrations": True})
+    )
     n_total = len(spots)
     if n_total < MIN_SPOTS:
         raise ValueError(
@@ -646,13 +622,14 @@ def estimate_aberrations(
     params_global = vectorfit.fit_params(
         parameters, model="xyz_aberrations", **common
     )
-    fixed, orders = vectorfit._fixed_aberrations(
+    _, orders = vectorfit._fixed_aberrations(
         vectorfit_py, params_local, parameters
     )
     is_3d = parameters["Fit model"] == "3D"
-    gammas = initial_gammas(fixed, parameters["Wavelength"], is_3d, rng)
+    # the manual aberrations are not used, as in VectorFit
+    gammas = initial_gammas(parameters["Wavelength"], is_3d, rng)
     initial = gammas.copy()
-    reference = reference_gamma(gammas)
+    reference = REFERENCE
 
     indices = select_spots(roi, image_shape, n_spots, rng)
     selected = np.maximum(np.asarray(spots[indices], np.float64), 1e-3)

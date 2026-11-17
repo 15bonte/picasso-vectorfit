@@ -107,11 +107,10 @@ _MODELS = {"2D": "xy_constaberrations", "3D": "xyz_constaberrations"}
 #:   ``localize`` script does. ``localize.fit`` records how many were
 #:   discarded in the metadata, as "VectorFit outliers discarded".
 #: - "Estimate aberrations": estimate the field-dependent aberrations from
-#:   the spots before the fit (see ``picasso.vectorfit_aberrations``), as
-#:   VectorFit's ``estimate_aberrations`` script does, instead of using
-#:   the fixed primary aberrations above, which then only serve as initial
-#:   values. ``localize.fit`` records the estimate in the metadata, as
-#:   "VectorFit estimated aberrations".
+#:   the spots before the fit (see ``picasso.vectorfit_aberrations``),
+#:   instead of using the primary aberrations above, which are then
+#:   ignored (the 3D model needs none of them). ``localize.fit`` records
+#:   the estimate in the metadata, as "VectorFit estimated aberrations".
 #: - "Aberration estimation spots": number of spots, selected uniformly
 #:   over the field of view, the estimation uses.
 DEFAULT_PARAMETERS = {
@@ -417,13 +416,18 @@ def parameters_with_defaults(parameters: dict | None = None) -> dict:
             "at least 50."
         )
     parameters["Aberration estimation spots"] = int(spots)
-    if parameters["Fit model"] == "3D" and not z_measurable(parameters):
+    if (
+        parameters["Fit model"] == "3D"
+        and not parameters["Estimate aberrations"]
+        and not z_measurable(parameters)
+    ):
         raise ValueError(
             "The VectorFit 3D model needs the vertical or oblique "
             "astigmatism or the spherical aberration: without them the PSF "
             "is the same above and below focus, so z cannot be measured. "
             "Set the aberration of your setup (e.g. the astigmatism of the "
-            "cylindrical lens), or fit in 2D."
+            "cylindrical lens), estimate the aberrations from the data, or "
+            "fit in 2D."
         )
     return parameters
 

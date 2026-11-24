@@ -6,9 +6,9 @@ Estimates the field-dependent aberrations of a VectorFit PSF model from
 the data itself, as VectorFit's MATLAB pipeline does between segmentation
 and localization (``SMLM_pipeline/estimate_aberrations.m``, with
 ``params.cpp = true``: the local updates by VectorFit's C++ fitter, as in
-``NAT_fitting/local_update_cpp.m``). It is a port of that pipeline, as
-fixed on the ``estimate_aberrations_fix`` branch of VectorFit, with its
-defaults (``set_parameters_microtubules_3D.m``), one rep and one init.
+``NAT_fitting/local_update_cpp.m``). It is a port of that pipeline for
+experimental data, with its defaults (``set_parameters_microtubules_3D.m``),
+one rep and one init.
 
 The aberrations are described by nodal aberration theory (NAT): the
 Zernike coefficient of every primary aberration varies over the field of
